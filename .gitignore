@@ -1,0 +1,10 @@
+# macOS & Xcode / SwiftPM build artifacts
+.DS_Store
+desktop/.build/
+desktop/build/
+*.xcuserstate
+DerivedData/
+
+# Local session scratchpads & execution logs
+.agy/scratchpad/
+.agy/transcripts/
