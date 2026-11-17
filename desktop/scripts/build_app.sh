@@ -77,5 +77,30 @@ EOF
 echo "==> Ad-hoc codesigning ${APP_BUNDLE}..."
 codesign --force --deep --sign - "${APP_BUNDLE}"
 
-echo "==> Built app bundle successfully at:"
+VERSION="1.0.0"
+ARCH="$(uname -m)"
+if [[ "${ARCH}" == "x86_64" ]]; then
+    ARCH="x64"
+fi
+ZIP_PATH="${BUILD_ROOT}/AGY-Account-Switcher-${VERSION}-${ARCH}.zip"
+DMG_PATH="${BUILD_ROOT}/AGY-Account-Switcher-${VERSION}-${ARCH}.dmg"
+DMG_STAGING="${BUILD_ROOT}/dmg_staging"
+
+echo "==> Creating ZIP archive ${ZIP_PATH}..."
+rm -f "${ZIP_PATH}"
+ditto -c -k --sequesterRsrc --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
+
+echo "==> Creating DMG image ${DMG_PATH}..."
+rm -rf "${DMG_STAGING}" "${DMG_PATH}"
+mkdir -p "${DMG_STAGING}"
+cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
+ln -s /Applications "${DMG_STAGING}/Applications"
+hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_STAGING}" -ov -format UDZO "${DMG_PATH}"
+rm -rf "${DMG_STAGING}"
+
+echo "==> Built app bundle & release archives successfully:"
 echo "    ${APP_BUNDLE}"
+echo "    ${ZIP_PATH}"
+echo "    ${DMG_PATH}"
+echo "==> SHA-256 Checksums:"
+shasum -a 256 "${DMG_PATH}" "${ZIP_PATH}"
