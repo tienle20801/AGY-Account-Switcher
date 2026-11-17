@@ -3,7 +3,7 @@ import UserNotifications
 
 // MARK: - Quota Threshold Notifier
 
-/// Sends a deduplicated macOS notification when Argon or Gemini remaining quota hits `<= 30%`.
+/// Sends a deduplicated macOS notification when Argon or Gemini remaining quota hits the configured threshold.
 @MainActor
 public final class QuotaThresholdNotifier: NSObject, UNUserNotificationCenterDelegate {
 
@@ -44,15 +44,22 @@ public final class QuotaThresholdNotifier: NSObject, UNUserNotificationCenterDel
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    /// Checks active account's Argon & Gemini buckets and fires once per reset window when `<= thresholdPercent`.
-    public func evaluateAndNotify(for accounts: [AccountProfile]) {
+    /// Checks active account's Argon & Gemini buckets and fires once per reset window when `<= activeThreshold`.
+    public func evaluateAndNotify(
+        for accounts: [AccountProfile],
+        isEnabled: Bool = true,
+        thresholdPercent: Int? = nil
+    ) {
+        guard isEnabled else { return }
         guard let activeAccount = accounts.first(where: { $0.isActive }) else { return }
+
+        let activeThreshold = min(95, max(5, thresholdPercent ?? self.thresholdPercent))
 
         for usage in activeAccount.modelUsages where Self.monitoredModelIDs.contains(usage.id) {
             let scopeKey = "\(activeAccount.id.uuidString)|\(usage.id)"
             let remaining = usage.remainingPercentageInt
 
-            if remaining > thresholdPercent {
+            if remaining > activeThreshold {
                 sentAlertKeys.removeValue(forKey: scopeKey)
                 continue
             }
@@ -66,7 +73,7 @@ public final class QuotaThresholdNotifier: NSObject, UNUserNotificationCenterDel
 
             let resetDetail = usage.remainingResetLabel().map { " · Làm mới sau \($0)" } ?? ""
             let title = "Cảnh báo Quota \(usage.shortLabel) còn \(remaining)%"
-            let body = "\(activeAccount.displayName): \(usage.displayName) đã chạm ngưỡng ≤ \(thresholdPercent)%\(resetDetail)."
+            let body = "\(activeAccount.displayName): \(usage.displayName) đã chạm ngưỡng ≤ \(activeThreshold)%\(resetDetail)."
             let identifier = "agy-quota-low-\(activeAccount.id.uuidString)-\(usage.id)-\(windowKey)"
             sendNotification(title, body, identifier)
         }

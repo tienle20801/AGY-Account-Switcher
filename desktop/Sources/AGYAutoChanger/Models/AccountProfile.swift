@@ -102,6 +102,8 @@ public struct SwitcherSettings: Codable, Sendable, Equatable {
     public var useKeychainFallback: Bool
     public var rollingWindowHours: Double
     public var bindLifecycleWithAGY: Bool
+    public var enableLowQuotaNotification: Bool
+    public var lowQuotaThresholdPercent: Int
 
     enum CodingKeys: String, CodingKey {
         case agyAppBundlePath
@@ -110,6 +112,8 @@ public struct SwitcherSettings: Codable, Sendable, Equatable {
         case useKeychainFallback
         case rollingWindowHours
         case bindLifecycleWithAGY
+        case enableLowQuotaNotification
+        case lowQuotaThresholdPercent
     }
 
     public init(
@@ -118,7 +122,9 @@ public struct SwitcherSettings: Codable, Sendable, Equatable {
         syncIDESession: Bool = false,
         useKeychainFallback: Bool = true,
         rollingWindowHours: Double = AppConfig.defaultRollingWindowHours,
-        bindLifecycleWithAGY: Bool = true
+        bindLifecycleWithAGY: Bool = true,
+        enableLowQuotaNotification: Bool = true,
+        lowQuotaThresholdPercent: Int = AppConfig.lowQuotaAlertThresholdPercent
     ) {
         self.agyAppBundlePath = agyAppBundlePath
         self.autoRelaunchAGY = autoRelaunchAGY
@@ -126,6 +132,8 @@ public struct SwitcherSettings: Codable, Sendable, Equatable {
         self.useKeychainFallback = useKeychainFallback
         self.rollingWindowHours = rollingWindowHours
         self.bindLifecycleWithAGY = bindLifecycleWithAGY
+        self.enableLowQuotaNotification = enableLowQuotaNotification
+        self.lowQuotaThresholdPercent = min(95, max(5, lowQuotaThresholdPercent))
     }
 
     public init(from decoder: Decoder) throws {
@@ -136,5 +144,8 @@ public struct SwitcherSettings: Codable, Sendable, Equatable {
         self.useKeychainFallback = try container.decodeIfPresent(Bool.self, forKey: .useKeychainFallback) ?? true
         self.rollingWindowHours = try container.decodeIfPresent(Double.self, forKey: .rollingWindowHours) ?? AppConfig.defaultRollingWindowHours
         self.bindLifecycleWithAGY = try container.decodeIfPresent(Bool.self, forKey: .bindLifecycleWithAGY) ?? true
+        self.enableLowQuotaNotification = try container.decodeIfPresent(Bool.self, forKey: .enableLowQuotaNotification) ?? true
+        let decodedThreshold = try container.decodeIfPresent(Int.self, forKey: .lowQuotaThresholdPercent) ?? AppConfig.lowQuotaAlertThresholdPercent
+        self.lowQuotaThresholdPercent = min(95, max(5, decodedThreshold))
     }
 }

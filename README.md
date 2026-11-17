@@ -10,8 +10,8 @@ Native macOS Menu Bar (`MenuBarExtra`) utility for **1-click Google Antigravity 
 - **Live Multi-Bucket Quota Tracking**:
   - Tracks **Gemini 5h / Weekly**, **Claude & GPT 5h / Weekly**, and **Gemini 4 Argon Weekly** remaining percentages and reset countdowns.
   - Combines fast Cloud Code REST endpoints (`/v1internal:loadCodeAssist`, `/v1internal:retrieveUserQuotaSummary`, `/v1internal:retrieveUserQuota`, `/v1internal:fetchAvailableModels`), official Antigravity CLI (`agy -p /usage --output-format stream-json`) for dedicated Argon quota, and strictly read-only SQLite + `transcript.jsonl` telemetry fallback.
-- **Proactive ≤ 30% Quota Alerts**:
-  - Background polling (every 2 minutes) and deduplicated macOS `UNUserNotificationCenter` banners when active **Argon** or **Gemini** buckets drop to `≤ 30%`.
+- **Configurable Low-Quota Alerts**:
+  - Background polling (every 2 minutes) and deduplicated macOS `UNUserNotificationCenter` banners when active **Argon** or **Gemini** buckets drop below a configurable threshold (default `30%`, toggleable and customizable `5%–95%` in Settings).
 - **Companion Lifecycle Binding**:
   - Event-driven `AGYWatcher` LaunchAgent opens `AGY Account Switcher.app` automatically when Antigravity launches and quits when Antigravity exits externally (ignoring managed account-switch restarts).
 

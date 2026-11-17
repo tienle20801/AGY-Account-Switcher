@@ -127,7 +127,7 @@ public struct MenuBarPopoverView: View {
             ? 120
             : CGFloat(service.accounts.count) * 154 + CGFloat(max(0, service.accounts.count - 1)) * 8
         let extras: CGFloat =
-            (isShowingSettings ? 320 : 0) +
+            (isShowingSettings ? 365 : 0) +
             (isShowingAddPanel ? 270 : 0) +
             (service.switchPhase != .idle ? 52 : 0)
         return cardsHeight + extras + 20

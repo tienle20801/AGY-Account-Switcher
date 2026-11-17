@@ -73,7 +73,9 @@ public final class AccountSwitcherService: ObservableObject {
             loadSettings()
             lifecycleService.startObserving()
             lifecycleService.syncWatcherRegistration(enabled: settings.bindLifecycleWithAGY)
-            quotaNotifier.requestAuthorizationIfNeeded()
+            if settings.enableLowQuotaNotification {
+                quotaNotifier.requestAuthorizationIfNeeded()
+            }
             startBackgroundQuotaPolling()
             loadAccounts()
             liveState = inspectCurrentLiveState(readKeychainSecret: false)
@@ -117,7 +119,7 @@ public final class AccountSwitcherService: ObservableObject {
 
             accumulateLocalTelemetry(forAccountAt: activeIndex)
             persistAccountsSilently()
-            quotaNotifier.evaluateAndNotify(for: accounts)
+            evaluateQuotaNotifications()
         }
 
         Task { [weak self] in
@@ -384,9 +386,15 @@ public final class AccountSwitcherService: ObservableObject {
     }
 
     public func saveSettings(_ updated: SwitcherSettings) {
-        settings = updated
+        var sanitized = updated
+        sanitized.lowQuotaThresholdPercent = min(95, max(5, sanitized.lowQuotaThresholdPercent))
+        settings = sanitized
         try? vaultSecurity.writeJSON(settings, to: AppConfig.settingsMetadataURL)
         lifecycleService.syncWatcherRegistration(enabled: settings.bindLifecycleWithAGY)
+        if settings.enableLowQuotaNotification {
+            quotaNotifier.requestAuthorizationIfNeeded()
+            evaluateQuotaNotifications()
+        }
         refreshLiveStateAndUsage()
     }
 
@@ -482,7 +490,7 @@ public final class AccountSwitcherService: ObservableObject {
 
         if didUpdateAny {
             persistAccountsSilently()
-            quotaNotifier.evaluateAndNotify(for: accounts)
+            evaluateQuotaNotifications()
         }
 
         if CloudCodeQuotaService.isAgyCLIAvailable && !isSyncingCLIUsage {
@@ -519,7 +527,15 @@ public final class AccountSwitcherService: ObservableObject {
         accounts[activeIdx].modelUsages = applied.usages
         accounts[activeIdx].lastDashboardSyncAt = cliSnapshot.syncedAt
         persistAccountsSilently()
-        quotaNotifier.evaluateAndNotify(for: accounts)
+        evaluateQuotaNotifications()
+    }
+
+    private func evaluateQuotaNotifications() {
+        quotaNotifier.evaluateAndNotify(
+            for: accounts,
+            isEnabled: settings.enableLowQuotaNotification,
+            thresholdPercent: settings.lowQuotaThresholdPercent
+        )
     }
 
     private func startBackgroundQuotaPolling() {
@@ -571,7 +587,7 @@ public final class AccountSwitcherService: ObservableObject {
                     // Persist the refreshed access_token & updated metadata cleanly to Vault
                     try? self.snapshotActiveAccount(account: self.accounts[idx])
                     self.persistAccountsSilently()
-                    self.quotaNotifier.evaluateAndNotify(for: self.accounts)
+                    self.evaluateQuotaNotifications()
                     if CloudCodeQuotaService.isAgyCLIAvailable && !self.isSyncingCLIUsage {
                         Task { [weak self] in
                             await self?.syncActiveAccountCLIUsageIfAvailable()

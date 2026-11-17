@@ -92,6 +92,30 @@ struct SettingsInlineView: View {
                     .frame(width: 175)
                 }
 
+                VStack(alignment: .leading, spacing: 5) {
+                    Toggle("Bật cảnh báo macOS khi sắp hết Quota (Argon & Gemini)", isOn: $draft.enableLowQuotaNotification)
+                        .font(.system(size: 12))
+
+                    if draft.enableLowQuotaNotification {
+                        HStack(spacing: 6) {
+                            Text("Mức cảnh báo còn lại (5%–95%):")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            TextField("30", value: $draft.lowQuotaThresholdPercent, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 11, design: .monospaced))
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 46)
+                            Text("%")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Stepper("", value: $draft.lowQuotaThresholdPercent, in: 5...95, step: 5)
+                                .labelsHidden()
+                        }
+                    }
+                }
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Đường dẫn Antigravity.app")
                         .font(.system(size: 11))
@@ -130,6 +154,7 @@ struct SettingsInlineView: View {
     }
 
     private func saveAndClose() {
+        draft.lowQuotaThresholdPercent = min(95, max(5, draft.lowQuotaThresholdPercent))
         onSave(draft)
         onClose()
     }

@@ -221,6 +221,18 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
         }
         notifier.evaluateAndNotify(for: [activeAccount])
         XCTAssertEqual(sentAlerts.count, 3)
+
+        // Disabled notifications suppress all alerts even when below threshold
+        if let geminiWeeklyIdx = activeAccount.modelUsages.firstIndex(where: { $0.id == "gemini-weekly" }) {
+            activeAccount.modelUsages[geminiWeeklyIdx].quotaRemainingFraction = 0.45
+        }
+        notifier.evaluateAndNotify(for: [activeAccount], isEnabled: false, thresholdPercent: 50)
+        XCTAssertEqual(sentAlerts.count, 3)
+
+        // Custom threshold (50%) alerts for gemini-weekly (45%)
+        notifier.evaluateAndNotify(for: [activeAccount], isEnabled: true, thresholdPercent: 50)
+        XCTAssertEqual(sentAlerts.count, 4)
+        XCTAssertTrue(sentAlerts.last?.body.contains("≤ 50%") ?? false)
     }
 
     func testParseAgyCLIStreamJSONAndFallbackToSharedGeminiWeeklyForArgon() {

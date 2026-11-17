@@ -1,6 +1,6 @@
 # AGY Account Switcher
 
-macOS Menu Bar utility (`MenuBarExtra`) for **1-click Antigravity (AGY) account switching**, **real-time multi-bucket quota tracking** (Gemini, Claude/GPT, Argon), **30% threshold notifications**, and **companion lifecycle sync**.
+macOS Menu Bar utility (`MenuBarExtra`) for **1-click Antigravity (AGY) account switching**, **real-time multi-bucket quota tracking** (Gemini, Claude/GPT, Argon), **configurable low-quota threshold notifications**, and **companion lifecycle sync**.
 
 ## Architecture (Clean Root)
 - `desktop/`: Swift Package Manager macOS SwiftUI MenuBarExtra application (`AGYAutoChanger`)
@@ -12,7 +12,7 @@ macOS Menu Bar utility (`MenuBarExtra`) for **1-click Antigravity (AGY) account 
       - `KeychainFallbackService.swift`: Native `SecItemCopyMatching`/`SecItemAdd`/`SecItemDelete` sync for Antigravity 2.0's primary `gemini`/`antigravity` Keychain item (`go-keyring`), `security -i` batch delete/import, OAuth token refresh, unexpired in-memory bearer token extraction, and `userTier` metadata parser
     - `Quota/`:
       - `CloudCodeQuotaService.swift`: Syncs live official Dashboard quota buckets (`gemini-5h`, `gemini-weekly`, `3p-5h`, `3p-weekly`, `argon-weekly`), `resetTime`, and `paidTier`/`currentTier` via `/v1internal:loadCodeAssist`, `/v1internal:retrieveUserQuotaSummary`, `/v1internal:retrieveUserQuota`, `/v1internal:fetchAvailableModels`, plus `agy -p /usage --output-format stream-json` CLI integration for dedicated `Gemini 4 Argon` quota
-      - `QuotaThresholdNotifier.swift`: Sends deduplicated macOS `UNUserNotificationCenter` banners when active account Argon or Gemini quota hits `<= 30%`
+      - `QuotaThresholdNotifier.swift`: Sends deduplicated macOS `UNUserNotificationCenter` banners when active account Argon or Gemini quota hits user-configured threshold (default `<= 30%`, toggleable in Settings)
       - `UsageTrackerService.swift`: Strictly read-only SQLite+WAL protobuf (`gen_metadata` + `steps` keyed by `last_step_index`) scanner adapted from `adahime/agy-hud`, plus `transcript.jsonl` fallback and incremental merge that never resets quota/turns across switches
     - `Session/`:
       - `AGYStateInspectorService.swift`: Detects active account email from `app_storage.json` (`agy.onboarding.lastLoginUsername`), `antigravity_state.pbtxt`, `Preferences`, IDE `state.vscdb`, and `userTier` metadata
