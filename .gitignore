@@ -8,3 +8,6 @@ DerivedData/
 # Local session scratchpads & execution logs
 .agy/scratchpad/
 .agy/transcripts/
+
+# Local Graphify knowledge graph artifacts
+graphify-out/

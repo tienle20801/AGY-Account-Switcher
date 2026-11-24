@@ -209,6 +209,10 @@ public final class KeychainFallbackService: Sendable {
         var fileCandidates: [Data] = []
 
         if let profileDir {
+            let profileCLI = profileDir.appendingPathComponent("cli_oauth_token", isDirectory: false)
+            if let fileData = try? Data(contentsOf: profileCLI), !fileData.isEmpty {
+                fileCandidates.append(fileData)
+            }
             let profileJetski = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
             if let fileData = try? Data(contentsOf: profileJetski), !fileData.isEmpty {
                 fileCandidates.append(fileData)
@@ -281,6 +285,95 @@ public final class KeychainFallbackService: Sendable {
         return refreshed.accessToken
     }
 
+    /// Extracts the saved OAuth `refresh_token` from an account's vault directory (`jetski_oauth_token` or `keychain_fallback.json`).
+    public func extractRefreshToken(fromProfileDir profileDir: URL) -> String? {
+        let candidates = collectTokenDataCandidates(
+            fromProfileDir: profileDir,
+            includeLiveJetskiFile: false,
+            jetskiTokenURL: AppConfig.jetskiOAuthTokenURL
+        )
+        return firstRefreshToken(in: candidates)
+    }
+
+    /// Extracts the primary `gemini`/`antigravity` Base64-encoded keyring secret from `keychain_fallback.json`.
+    public func extractPrimaryKeyringSecretBase64(fromProfileDir profileDir: URL) -> String? {
+        let backupFile = profileDir.appendingPathComponent("keychain_fallback.json", isDirectory: false)
+        guard let records = try? vaultSecurity.readJSON([KeychainItemRecord].self, from: backupFile),
+              let primary = records.first(where: {
+                  $0.service == AppConfig.primaryAuthKeychainTarget.service
+                      && $0.account == AppConfig.primaryAuthKeychainTarget.account
+              }) else {
+            return nil
+        }
+        return primary.secretBase64
+    }
+
+    /// Extracts unwrapped raw OAuth JSON bytes from `profileDir` suitable for mirroring to `~/.gemini/antigravity-cli/antigravity-oauth-token`.
+    public func extractUnwrappedOAuthJSON(fromProfileDir profileDir: URL) -> Data? {
+        let candidates = collectTokenDataCandidates(
+            fromProfileDir: profileDir,
+            includeLiveJetskiFile: false,
+            jetskiTokenURL: AppConfig.jetskiOAuthTokenURL
+        )
+        for rawData in candidates {
+            if let json = unwrapGoKeyringPayload(rawData), !json.isEmpty {
+                return json
+            }
+        }
+        return nil
+    }
+
+    /// Seeds `keychain_fallback.json` and `jetski_oauth_token` (`0600`) inside `profileDir` from an imported refresh token or raw keyring backup.
+    @discardableResult
+    public func seedProfileCredentials(
+        to profileDir: URL,
+        email: String,
+        tier: AccountTier,
+        refreshToken: String?,
+        rawKeyringSecretBase64: String?
+    ) throws -> Bool {
+        try vaultSecurity.createSecureDirectoryIfNeeded(at: profileDir)
+
+        let backupFile = profileDir.appendingPathComponent("keychain_fallback.json", isDirectory: false)
+        let jetskiFile = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
+        let serviceName = AppConfig.primaryAuthKeychainTarget.service
+        let accountName = AppConfig.primaryAuthKeychainTarget.account ?? "antigravity"
+
+        if let rawBase64 = rawKeyringSecretBase64?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawBase64.isEmpty,
+           let decodedSecret = Data(base64Encoded: rawBase64) {
+            let record = KeychainItemRecord(service: serviceName, account: accountName, secretBase64: rawBase64)
+            try vaultSecurity.writeJSON([record], to: backupFile)
+            if let unwrappedJSON = unwrapGoKeyringPayload(decodedSecret) {
+                try vaultSecurity.writeProtectedData(unwrappedJSON, to: jetskiFile)
+            } else {
+                try vaultSecurity.writeProtectedData(decodedSecret, to: jetskiFile)
+            }
+            return true
+        }
+
+        if let token = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            let payload: [String: Any] = [
+                "email": email,
+                "userTier": "\(tier.rawValue)-tier",
+                "token": [
+                    "refresh_token": token
+                ]
+            ]
+            let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            let wrappedString = "go-keyring-base64:" + jsonData.base64EncodedString()
+            let secretBase64 = Data(wrappedString.utf8).base64EncodedString()
+            let record = KeychainItemRecord(service: serviceName, account: accountName, secretBase64: secretBase64)
+
+            try vaultSecurity.writeJSON([record], to: backupFile)
+            try vaultSecurity.writeProtectedData(jsonData, to: jetskiFile)
+            return true
+        }
+
+        return false
+    }
+
     private func collectTokenDataCandidates(
         fromProfileDir profileDir: URL?,
         includeLiveJetskiFile: Bool,
@@ -288,6 +381,10 @@ public final class KeychainFallbackService: Sendable {
     ) -> [Data] {
         var fileCandidates: [Data] = []
         if let profileDir {
+            let profileCLI = profileDir.appendingPathComponent("cli_oauth_token", isDirectory: false)
+            if let fileData = try? Data(contentsOf: profileCLI), !fileData.isEmpty {
+                fileCandidates.append(fileData)
+            }
             let profileJetski = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
             if let fileData = try? Data(contentsOf: profileJetski), !fileData.isEmpty {
                 fileCandidates.append(fileData)

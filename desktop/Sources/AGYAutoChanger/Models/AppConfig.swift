@@ -8,6 +8,7 @@ public enum AppConfig {
     // MARK: - Application & Data Paths
 
     public static let defaultAppBundlePath = "/Applications/Antigravity.app"
+    public static let defaultIDEAppBundlePath = "/Applications/Antigravity IDE.app"
 
     public static var homeDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -36,6 +37,16 @@ public enum AppConfig {
         geminiRootDir.appendingPathComponent(jetskiOAuthTokenFileName, isDirectory: false)
     }
 
+    public static var agyCLIDir: URL {
+        geminiRootDir.appendingPathComponent("antigravity-cli", isDirectory: true)
+    }
+
+    public static let agyCLIOAuthTokenFileName = "antigravity-oauth-token"
+
+    public static var agyCLIOAuthTokenURL: URL {
+        agyCLIDir.appendingPathComponent(agyCLIOAuthTokenFileName, isDirectory: false)
+    }
+
     public static var agyAppStorageURL: URL {
         agyAppSupportDir.appendingPathComponent("app_storage.json", isDirectory: false)
     }
@@ -54,6 +65,7 @@ public enum AppConfig {
 
     public static let cloudCodeBaseURLs: [String] = [
         "https://daily-cloudcode-pa.googleapis.com",
+        "https://daily-cloudcode-pa.sandbox.googleapis.com",
         "https://cloudcode-pa.googleapis.com"
     ]
 
@@ -119,6 +131,14 @@ public enum AppConfig {
 
     public static var settingsMetadataURL: URL {
         vaultRootDir.appendingPathComponent("settings.json", isDirectory: false)
+    }
+
+    public static var autoSwitchStateURL: URL {
+        vaultRootDir.appendingPathComponent("auto_switch_state.json", isDirectory: false)
+    }
+
+    public static var weeklyWarmupStateURL: URL {
+        vaultRootDir.appendingPathComponent("weekly_warmup_state.json", isDirectory: false)
     }
 
     // MARK: - Tracked Session Artifacts (Priority 1)
@@ -203,6 +223,18 @@ public enum AppConfig {
     public static let lowQuotaAlertThresholdPercent: Int = 30
     public static let defaultRollingWindowHours: Double = 5.0
     public static let defaultCooldownMinutes: Int = 60
+    public static let autoSwitchDefaultTriggerPercent: Int = 10
+    public static let autoSwitchDefaultMinBackupPercent: Int = 30
+    public static let autoSwitchMaxQuotaAgeSeconds: TimeInterval = 180
+    public static let autoSwitchIdleQuietWindowSeconds: TimeInterval = 25
+    public static let autoSwitchIdleRecheckIntervalNanoseconds: UInt64 = 15_000_000_000
+    public static let weeklyWarmupPacingNanoseconds: UInt64 = 2_000_000_000
+    public static let weeklyWarmupMinRemainingFraction: Double = 0.999
+    public static let weeklyWarmupMaxElapsedResetSeconds: TimeInterval = 6 * 86_400
+    public static let weeklyWarmupHistoryRetentionSeconds: TimeInterval = 30 * 86_400
+    public static let weeklyWarmupFailureRetryCooldownSeconds: TimeInterval = 600
+    public static let fiveHourWarmupMaxElapsedResetSeconds: TimeInterval = 4 * 3_600
+    public static let fiveHourWarmupMinWeeklySiblingFraction: Double = 0.05
 
     // MARK: - Companion Lifecycle Binding
 
@@ -229,9 +261,20 @@ public enum AppConfig {
         ModelDefinition(id: "gemini-5h", displayName: "Gemini Models (5 giờ)", shortLabel: "Gemini 5h"),
         ModelDefinition(id: "gemini-weekly", displayName: "Gemini Models (Tuần)", shortLabel: "Gemini Tuần"),
         ModelDefinition(id: "3p-5h", displayName: "Claude & GPT (5 giờ)", shortLabel: "Claude 5h"),
-        ModelDefinition(id: "3p-weekly", displayName: "Claude & GPT (Tuần)", shortLabel: "Claude Tuần"),
-        ModelDefinition(id: "argon-weekly", displayName: "Gemini 4 Argon (Tuần)", shortLabel: "Argon Tuần")
+        ModelDefinition(id: "3p-weekly", displayName: "Claude & GPT (Tuần)", shortLabel: "Claude Tuần")
     ]
+
+    /// Optional dedicated quota pools shown dynamically on an account only when reported by the backend.
+    public static let optionalDedicatedModels: [ModelDefinition] = [
+        ModelDefinition(id: "argon-weekly", displayName: "Gemini 4 Argon (Tuần)", shortLabel: "Argon Tuần"),
+        ModelDefinition(id: "carbon-5h", displayName: "Gemini 4 Carbon (5 giờ)", shortLabel: "Carbon 5h"),
+        ModelDefinition(id: "carbon-weekly", displayName: "Gemini 4 Carbon (Tuần)", shortLabel: "Carbon Tuần")
+    ]
+
+    public static func modelDefinition(for modelID: String) -> ModelDefinition? {
+        supportedModels.first(where: { $0.id == modelID })
+            ?? optionalDedicatedModels.first(where: { $0.id == modelID })
+    }
 
     public static let avatarPaletteHex: [String] = [
         "#3B82F6", // Electric Blue
@@ -242,6 +285,8 @@ public enum AppConfig {
         "#06B6D4"  // Cyan
     ]
 
-    public static let uiPopoverWidth: CGFloat = 432
-    public static let uiPopoverMaxHeight: CGFloat = 580
+    public static let uiPopoverMinWidth: CGFloat = 400
+    public static let uiPopoverIdealWidth: CGFloat = 436
+    public static let uiPopoverMaxWidth: CGFloat = 480
+    public static let uiPopoverMaxScreenFraction: CGFloat = 0.78
 }

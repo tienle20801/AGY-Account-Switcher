@@ -3,17 +3,11 @@ import UserNotifications
 
 // MARK: - Quota Threshold Notifier
 
-/// Sends a deduplicated macOS notification when Argon or Gemini remaining quota hits the configured threshold.
+/// Sends a deduplicated macOS notification when any monitored Google/Gemini/dedicated remaining quota hits the configured threshold.
 @MainActor
 public final class QuotaThresholdNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     public typealias NotificationSender = @MainActor (_ title: String, _ body: String, _ identifier: String) -> Void
-
-    private static let monitoredModelIDs: Set<String> = [
-        "argon-weekly",
-        "gemini-5h",
-        "gemini-weekly"
-    ]
 
     private let thresholdPercent: Int
     private let sendNotification: NotificationSender
@@ -55,7 +49,7 @@ public final class QuotaThresholdNotifier: NSObject, UNUserNotificationCenterDel
 
         let activeThreshold = min(95, max(5, thresholdPercent ?? self.thresholdPercent))
 
-        for usage in activeAccount.modelUsages where Self.monitoredModelIDs.contains(usage.id) {
+        for usage in activeAccount.modelUsages where !QuotaModelFilterScope.isThirdPartyBucket(usage.id) && !usage.isUnknownObservation {
             let scopeKey = "\(activeAccount.id.uuidString)|\(usage.id)"
             let remaining = usage.remainingPercentageInt
 

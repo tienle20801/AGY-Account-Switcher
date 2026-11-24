@@ -3,6 +3,57 @@ import SQLite3
 
 // MARK: - Usage Aggregation Snapshot
 
+public struct DailyUsageOverview: Sendable, Equatable {
+    public var inputTokens: Int
+    public var outputTokens: Int
+    public var cachedTokens: Int
+    public var totalTurns: Int
+    public var estimatedCostUSD: Double
+
+    public var totalTokens: Int {
+        inputTokens + outputTokens + cachedTokens
+    }
+
+    public var cacheHitPercentage: Int {
+        let denom = inputTokens + cachedTokens
+        guard denom > 0 else { return 0 }
+        return Int((Double(cachedTokens) / Double(denom) * 100.0).rounded())
+    }
+
+    public init(
+        inputTokens: Int = 0,
+        outputTokens: Int = 0,
+        cachedTokens: Int = 0,
+        totalTurns: Int = 0,
+        estimatedCostUSD: Double = 0.0
+    ) {
+        self.inputTokens = max(0, inputTokens)
+        self.outputTokens = max(0, outputTokens)
+        self.cachedTokens = max(0, cachedTokens)
+        self.totalTurns = max(0, totalTurns)
+        self.estimatedCostUSD = max(0.0, estimatedCostUSD)
+    }
+}
+
+public struct AggregateQuotaOverview: Sendable, Equatable {
+    public var availableAccountsCount: Int
+    public var totalEnabledAccountsCount: Int
+    public var average5hRemainingPercent: Int?
+    public var averageWeeklyRemainingPercent: Int?
+
+    public init(
+        availableAccountsCount: Int = 0,
+        totalEnabledAccountsCount: Int = 0,
+        average5hRemainingPercent: Int? = nil,
+        averageWeeklyRemainingPercent: Int? = nil
+    ) {
+        self.availableAccountsCount = availableAccountsCount
+        self.totalEnabledAccountsCount = totalEnabledAccountsCount
+        self.average5hRemainingPercent = average5hRemainingPercent
+        self.averageWeeklyRemainingPercent = averageWeeklyRemainingPercent
+    }
+}
+
 public struct ModelUsageSummary: Sendable, Equatable {
     public var turnsByModel: [String: Int]
     public var tokensByModel: [String: Int]
@@ -130,6 +181,9 @@ private enum ProtobufWireScanner {
         bucketIDs: [String],
         modelDisplayName: String?,
         tokens: Int,
+        inputTokens: Int,
+        outputTokens: Int,
+        cachedTokens: Int,
         referencedStepIndex: Int?,
         directTimestamp: Date?
     )? {
@@ -182,15 +236,25 @@ private enum ProtobufWireScanner {
         let bucketIDs = mappedBuckets.isEmpty ? ["gemini-5h", "gemini-weekly"] : mappedBuckets
         let cleanDisplay = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let modelDisplayName = (cleanDisplay?.isEmpty == false) ? cleanDisplay : routedModelID
-        let tokens = parseTokenSum(from: usageData ?? legacyUsageData)
-        return (bucketIDs, modelDisplayName, tokens, referencedStepIndex, directTimestamp)
+        let breakdown = parseTokenBreakdown(from: usageData ?? legacyUsageData)
+        return (
+            bucketIDs,
+            modelDisplayName,
+            breakdown.total,
+            breakdown.input,
+            breakdown.output,
+            breakdown.cached,
+            referencedStepIndex,
+            directTimestamp
+        )
     }
 
-    private static func parseTokenSum(from data: Data?) -> Int {
-        guard let data else { return 0 }
+    private static func parseTokenBreakdown(from data: Data?) -> (input: Int, output: Int, cached: Int, total: Int) {
+        guard let data else { return (0, 0, 0, 0) }
         var inputTokens = 0
         var outputTokens = 0
         var fallbackOut = 0
+        var cachedTokens = 0
         var thinkingTokens = 0
         var visibleTokens = 0
 
@@ -201,6 +265,7 @@ private enum ProtobufWireScanner {
             case 1: fallbackOut = count
             case 2: inputTokens = count
             case 3: outputTokens = count
+            case 5: cachedTokens = count
             case 9: thinkingTokens = count
             case 10: visibleTokens = count
             default: break
@@ -208,7 +273,8 @@ private enum ProtobufWireScanner {
         }
 
         let resolvedOutput = outputTokens > 0 ? outputTokens : (fallbackOut > 0 ? fallbackOut : (thinkingTokens + visibleTokens))
-        return max(0, inputTokens + resolvedOutput)
+        let total = max(0, inputTokens + resolvedOutput)
+        return (max(0, inputTokens), max(0, resolvedOutput), max(0, cachedTokens), total)
     }
 }
 
@@ -222,9 +288,123 @@ public final class UsageTrackerService: Sendable {
         let type: String?
         let created_at: String?
         let content: String?
+        let model: String?
+        let input_tokens: Int?
+        let cache_read_tokens: Int?
+        let output_tokens: Int?
     }
 
     public init() {}
+
+    /// Computes today's aggregated token breakdown, turn count, and estimated API cost across local SQLite & transcripts.
+    public func scanTodayOverview(
+        brainDir: URL = AppConfig.agyBrainDir,
+        conversationsDir: URL = AppConfig.agyConversationsDir,
+        referenceDate: Date = Date()
+    ) -> DailyUsageOverview {
+        let startOfDay = Calendar.current.startOfDay(for: referenceDate)
+        var summary = ModelUsageSummary()
+        var overview = DailyUsageOverview()
+
+        let coveredConversationIDs = scanConversationDatabases(
+            in: conversationsDir,
+            cutoff: startOfDay,
+            upperBound: referenceDate,
+            into: &summary,
+            dailyOverview: &overview
+        )
+
+        scanTranscriptLogs(
+            in: brainDir,
+            cutoff: startOfDay,
+            upperBound: referenceDate,
+            excludingConversationIDs: coveredConversationIDs,
+            into: &summary,
+            dailyOverview: &overview
+        )
+
+        return overview
+    }
+
+    public static func estimateCostUSD(
+        bucketIDs: [String],
+        inputTokens: Int,
+        outputTokens: Int,
+        cachedTokens: Int
+    ) -> Double {
+        let inputRate: Double
+        let outputRate: Double
+        let cachedRate: Double
+
+        if bucketIDs.contains(where: { $0.hasPrefix("3p") }) {
+            inputRate = 3.00
+            outputRate = 15.00
+            cachedRate = 0.30
+        } else if bucketIDs.contains("argon-weekly") || bucketIDs.contains(where: { $0.hasPrefix("carbon") }) {
+            inputRate = 1.25
+            outputRate = 10.00
+            cachedRate = 0.3125
+        } else {
+            inputRate = 0.30
+            outputRate = 2.50
+            cachedRate = 0.075
+        }
+
+        let inCost = (Double(max(0, inputTokens)) / 1_000_000.0) * inputRate
+        let outCost = (Double(max(0, outputTokens)) / 1_000_000.0) * outputRate
+        let cacheCost = (Double(max(0, cachedTokens)) / 1_000_000.0) * cachedRate
+        return inCost + outCost + cacheCost
+    }
+
+    public static func computeAggregateQuota(
+        for accounts: [AccountProfile],
+        reserveThresholdPercent: Int = 10,
+        modelScope: QuotaModelFilterScope = .all,
+        referenceDate: Date = Date()
+    ) -> AggregateQuotaOverview {
+        let enabledAccounts = accounts.filter { !$0.isDisabled }
+        var availableCount = 0
+        var fiveHourValues: [Double] = []
+        var weeklyValues: [Double] = []
+
+        for account in enabledAccounts {
+            let scopedUsages = account.modelUsages.filter { modelScope.includes(modelID: $0.id) }
+            let isAvailable = scopedUsages.contains { usage in
+                guard !usage.isUnknownObservation,
+                      !usage.isRateLimited(at: referenceDate) else {
+                    return false
+                }
+                let pct = Int((usage.remainingFractionValue(at: referenceDate) * 100.0).rounded())
+                return pct > reserveThresholdPercent
+            }
+            if isAvailable {
+                availableCount += 1
+            }
+
+            for usage in scopedUsages where !usage.isUnknownObservation {
+                let pct = usage.remainingFractionValue(at: referenceDate) * 100.0
+                if usage.id.hasSuffix("-5h") {
+                    fiveHourValues.append(pct)
+                } else if usage.id.hasSuffix("-weekly") {
+                    weeklyValues.append(pct)
+                }
+            }
+        }
+
+        let avg5h = fiveHourValues.isEmpty
+            ? nil
+            : Int((fiveHourValues.reduce(0, +) / Double(fiveHourValues.count)).rounded())
+        let avgWeekly = weeklyValues.isEmpty
+            ? nil
+            : Int((weeklyValues.reduce(0, +) / Double(weeklyValues.count)).rounded())
+
+        return AggregateQuotaOverview(
+            availableAccountsCount: availableCount,
+            totalEnabledAccountsCount: enabledAccounts.count,
+            average5hRemainingPercent: avg5h,
+            averageWeeklyRemainingPercent: avgWeekly
+        )
+    }
 
     /// Computes turn and token counts per model ID (`argon`, `pro`, `flash`, `claude`) inside the rolling window.
     public func scanUsage(
@@ -244,17 +424,22 @@ public final class UsageTrackerService: Sendable {
         }
 
         var summary = ModelUsageSummary()
+        var ignoredOverview: DailyUsageOverview? = nil
         let coveredConversationIDs = scanConversationDatabases(
             in: conversationsDir,
             cutoff: effectiveCutoff,
-            into: &summary
+            upperBound: nil,
+            into: &summary,
+            dailyOverview: &ignoredOverview
         )
 
         scanTranscriptLogs(
             in: brainDir,
             cutoff: effectiveCutoff,
+            upperBound: nil,
             excludingConversationIDs: coveredConversationIDs,
-            into: &summary
+            into: &summary,
+            dailyOverview: &ignoredOverview
         )
 
         return summary
@@ -263,6 +448,7 @@ public final class UsageTrackerService: Sendable {
     /// Replaces local turn counts from a full-window scan while preserving Dashboard quotas and cooldowns.
     public func merge(summary: ModelUsageSummary, into existing: [ModelUsage], tier: AccountTier) -> [ModelUsage] {
         var base = ModelUsage.defaultSet(for: tier)
+        let coreIDs = Set(base.map(\.id))
         for index in base.indices {
             let modelID = base[index].id
             let prior = existing.first(where: { $0.id == modelID })
@@ -277,6 +463,45 @@ public final class UsageTrackerService: Sendable {
             base[index].quotaRemainingFraction = prior?.quotaRemainingFraction
             base[index].quotaResetAt = prior?.quotaResetAt
             base[index].quotaSyncedAt = prior?.quotaSyncedAt
+            base[index].groupMembersHint = prior?.groupMembersHint
+        }
+
+        let optionalOrder = AppConfig.optionalDedicatedModels.map(\.id)
+        var extraIDs = Set(existing.filter { !coreIDs.contains($0.id) }.map(\.id))
+        for key in summary.turnsByModel.keys where !coreIDs.contains(key) && (summary.turnsByModel[key] ?? 0) > 0 {
+            extraIDs.insert(key)
+        }
+        let sortedExtraIDs = extraIDs.sorted { lhs, rhs in
+            let lIdx = optionalOrder.firstIndex(of: lhs)
+            let rIdx = optionalOrder.firstIndex(of: rhs)
+            switch (lIdx, rIdx) {
+            case let (l?, r?): return l < r
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            }
+        }
+
+        for extraID in sortedExtraIDs {
+            let prior = existing.first(where: { $0.id == extraID })
+            let scannedTurns = summary.turnsByModel[extraID] ?? 0
+            guard prior != nil || scannedTurns > 0 else { continue }
+            let resolvedDisplayName = prior?.displayName ?? AppConfig.modelDefinition(for: extraID)?.displayName ?? extraID
+            base.append(
+                ModelUsage(
+                    id: extraID,
+                    displayName: resolvedDisplayName,
+                    turnsUsed: scannedTurns,
+                    turnLimit: tier.defaultTurnLimit(for: extraID),
+                    lastUsedAt: summary.lastUsedByModel[extraID] ?? prior?.lastUsedAt,
+                    cooldownUntil: prior?.cooldownUntil,
+                    quotaRemainingFraction: prior?.quotaRemainingFraction,
+                    quotaResetAt: prior?.quotaResetAt,
+                    quotaSyncedAt: prior?.quotaSyncedAt,
+                    tokensUsed: summary.tokensByModel[extraID] ?? prior?.tokensUsed,
+                    groupMembersHint: prior?.groupMembersHint
+                )
+            )
         }
         return base
     }
@@ -284,6 +509,7 @@ public final class UsageTrackerService: Sendable {
     /// Incrementally adds newly observed turns & tokens without wiping existing per-account progress on switch.
     public func mergeIncremental(summary: ModelUsageSummary, into existing: [ModelUsage], tier: AccountTier) -> [ModelUsage] {
         var base = ModelUsage.defaultSet(for: tier)
+        let coreIDs = Set(base.map(\.id))
         for index in base.indices {
             let modelID = base[index].id
             let prior = existing.first(where: { $0.id == modelID })
@@ -306,6 +532,61 @@ public final class UsageTrackerService: Sendable {
             base[index].quotaRemainingFraction = prior?.quotaRemainingFraction
             base[index].quotaResetAt = prior?.quotaResetAt
             base[index].quotaSyncedAt = prior?.quotaSyncedAt
+            base[index].groupMembersHint = prior?.groupMembersHint
+        }
+
+        let optionalOrder = AppConfig.optionalDedicatedModels.map(\.id)
+        var extraIDs = Set(existing.filter { !coreIDs.contains($0.id) }.map(\.id))
+        for (key, turns) in summary.turnsByModel where !coreIDs.contains(key) && turns > 0 {
+            extraIDs.insert(key)
+        }
+        for (key, tokens) in summary.tokensByModel where !coreIDs.contains(key) && tokens > 0 {
+            extraIDs.insert(key)
+        }
+        let sortedExtraIDs = extraIDs.sorted { lhs, rhs in
+            let lIdx = optionalOrder.firstIndex(of: lhs)
+            let rIdx = optionalOrder.firstIndex(of: rhs)
+            switch (lIdx, rIdx) {
+            case let (l?, r?): return l < r
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            }
+        }
+
+        for extraID in sortedExtraIDs {
+            let prior = existing.first(where: { $0.id == extraID })
+            let deltaTurns = summary.turnsByModel[extraID] ?? 0
+            let deltaTokens = summary.tokensByModel[extraID] ?? 0
+            guard prior != nil || deltaTurns > 0 || deltaTokens > 0 else { continue }
+            let scannedLastUsed = summary.lastUsedByModel[extraID]
+            let resolvedLastUsed: Date?
+            if let scannedLastUsed, let priorDate = prior?.lastUsedAt {
+                resolvedLastUsed = scannedLastUsed.timeIntervalSinceReferenceDate > priorDate.timeIntervalSinceReferenceDate
+                    ? scannedLastUsed
+                    : priorDate
+            } else {
+                resolvedLastUsed = scannedLastUsed ?? prior?.lastUsedAt
+            }
+            let resolvedTokens: Int? = (deltaTokens > 0 || prior?.tokensUsed != nil)
+                ? ((prior?.tokensUsed ?? 0) + deltaTokens)
+                : nil
+            let resolvedDisplayName = prior?.displayName ?? AppConfig.modelDefinition(for: extraID)?.displayName ?? extraID
+            base.append(
+                ModelUsage(
+                    id: extraID,
+                    displayName: resolvedDisplayName,
+                    turnsUsed: (prior?.turnsUsed ?? 0) + deltaTurns,
+                    turnLimit: tier.defaultTurnLimit(for: extraID),
+                    lastUsedAt: resolvedLastUsed,
+                    cooldownUntil: prior?.cooldownUntil,
+                    quotaRemainingFraction: prior?.quotaRemainingFraction,
+                    quotaResetAt: prior?.quotaResetAt,
+                    quotaSyncedAt: prior?.quotaSyncedAt,
+                    tokensUsed: resolvedTokens,
+                    groupMembersHint: prior?.groupMembersHint
+                )
+            )
         }
         return base
     }
@@ -315,13 +596,15 @@ public final class UsageTrackerService: Sendable {
     private func scanConversationDatabases(
         in conversationsDir: URL,
         cutoff: Date,
-        into summary: inout ModelUsageSummary
+        upperBound: Date?,
+        into summary: inout ModelUsageSummary,
+        dailyOverview: inout DailyUsageOverview?
     ) -> Set<String> {
         let fm = FileManager.default
         guard fm.fileExists(atPath: conversationsDir.path),
               let files = try? fm.contentsOfDirectory(
                 at: conversationsDir,
-                includingPropertiesForKeys: [.contentModificationDateKey],
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
                 options: [.skipsHiddenFiles]
               ) else {
             return []
@@ -330,17 +613,48 @@ public final class UsageTrackerService: Sendable {
         var coveredIDs: Set<String> = []
         for fileURL in files where fileURL.pathExtension == "db" {
             let convID = fileURL.deletingPathExtension().lastPathComponent
+            if let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+               fileSize > 0 {
+                coveredIDs.insert(convID)
+            }
             let mtime = walAwareModificationDate(for: fileURL)
             if let mtime,
                mtime.timeIntervalSinceReferenceDate < cutoff.timeIntervalSinceReferenceDate {
                 continue
             }
 
-            if parseConversationDatabase(at: fileURL, cutoff: cutoff, into: &summary) {
+            if parseConversationDatabase(
+                at: fileURL,
+                cutoff: cutoff,
+                upperBound: upperBound,
+                into: &summary,
+                dailyOverview: &dailyOverview
+            ) {
                 coveredIDs.insert(convID)
             }
         }
         return coveredIDs
+    }
+
+    private func scanConversationDatabases(
+        in conversationsDir: URL,
+        cutoff: Date,
+        upperBound: Date?,
+        into summary: inout ModelUsageSummary,
+        dailyOverview: inout DailyUsageOverview
+    ) -> Set<String> {
+        var optionalOverview: DailyUsageOverview? = dailyOverview
+        let ids = scanConversationDatabases(
+            in: conversationsDir,
+            cutoff: cutoff,
+            upperBound: upperBound,
+            into: &summary,
+            dailyOverview: &optionalOverview
+        )
+        if let updated = optionalOverview {
+            dailyOverview = updated
+        }
+        return ids
     }
 
     private func walAwareModificationDate(for dbURL: URL) -> Date? {
@@ -362,7 +676,9 @@ public final class UsageTrackerService: Sendable {
     private func parseConversationDatabase(
         at dbURL: URL,
         cutoff: Date,
-        into summary: inout ModelUsageSummary
+        upperBound: Date?,
+        into summary: inout ModelUsageSummary,
+        dailyOverview: inout DailyUsageOverview?
     ) -> Bool {
         var db: OpaquePointer?
         let uriString = "\(dbURL.absoluteString)?mode=ro"
@@ -420,6 +736,10 @@ public final class UsageTrackerService: Sendable {
                   stepDate.timeIntervalSinceReferenceDate >= cutoff.timeIntervalSinceReferenceDate else {
                 continue
             }
+            if let upperBound,
+               stepDate.timeIntervalSinceReferenceDate > upperBound.timeIntervalSinceReferenceDate {
+                continue
+            }
 
             for bucketID in record.bucketIDs {
                 summary.turnsByModel[bucketID, default: 0] += 1
@@ -427,6 +747,20 @@ public final class UsageTrackerService: Sendable {
                     summary.tokensByModel[bucketID, default: 0] += record.tokens
                 }
                 recordLastUsed(stepDate, for: bucketID, into: &summary)
+            }
+
+            if var currentOverview = dailyOverview {
+                currentOverview.totalTurns += 1
+                currentOverview.inputTokens += record.inputTokens
+                currentOverview.outputTokens += record.outputTokens
+                currentOverview.cachedTokens += record.cachedTokens
+                currentOverview.estimatedCostUSD += Self.estimateCostUSD(
+                    bucketIDs: record.bucketIDs,
+                    inputTokens: record.inputTokens,
+                    outputTokens: record.outputTokens,
+                    cachedTokens: record.cachedTokens
+                )
+                dailyOverview = currentOverview
             }
 
             if let modelDisplay = record.modelDisplayName {
@@ -450,8 +784,10 @@ public final class UsageTrackerService: Sendable {
     private func scanTranscriptLogs(
         in brainDir: URL,
         cutoff: Date,
+        upperBound: Date?,
         excludingConversationIDs: Set<String>,
-        into summary: inout ModelUsageSummary
+        into summary: inout ModelUsageSummary,
+        dailyOverview: inout DailyUsageOverview?
     ) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: brainDir.path),
@@ -482,11 +818,45 @@ public final class UsageTrackerService: Sendable {
                 continue
             }
 
-            parseTranscriptFile(at: logURL, cutoff: cutoff, into: &summary)
+            parseTranscriptFile(
+                at: logURL,
+                cutoff: cutoff,
+                upperBound: upperBound,
+                into: &summary,
+                dailyOverview: &dailyOverview
+            )
         }
     }
 
-    private func parseTranscriptFile(at url: URL, cutoff: Date, into summary: inout ModelUsageSummary) {
+    private func scanTranscriptLogs(
+        in brainDir: URL,
+        cutoff: Date,
+        upperBound: Date?,
+        excludingConversationIDs: Set<String>,
+        into summary: inout ModelUsageSummary,
+        dailyOverview: inout DailyUsageOverview
+    ) {
+        var optionalOverview: DailyUsageOverview? = dailyOverview
+        scanTranscriptLogs(
+            in: brainDir,
+            cutoff: cutoff,
+            upperBound: upperBound,
+            excludingConversationIDs: excludingConversationIDs,
+            into: &summary,
+            dailyOverview: &optionalOverview
+        )
+        if let updated = optionalOverview {
+            dailyOverview = updated
+        }
+    }
+
+    private func parseTranscriptFile(
+        at url: URL,
+        cutoff: Date,
+        upperBound: Date?,
+        into summary: inout ModelUsageSummary,
+        dailyOverview: inout DailyUsageOverview?
+    ) {
         guard let rawContent = try? String(contentsOf: url, encoding: .utf8) else {
             return
         }
@@ -511,11 +881,43 @@ public final class UsageTrackerService: Sendable {
                   stepDate.timeIntervalSinceReferenceDate >= cutoff.timeIntervalSinceReferenceDate else {
                 continue
             }
+            if let upperBound,
+               stepDate.timeIntervalSinceReferenceDate > upperBound.timeIntervalSinceReferenceDate {
+                continue
+            }
 
-            let buckets = ModelUsage.canonicalBucketIDs(modelID: currentModelID)
-            for bucketID in (buckets.isEmpty ? ["gemini-5h", "gemini-weekly"] : buckets) {
+            let stepModelBuckets = step.model.flatMap { modelName -> [String]? in
+                let mapped = ModelUsage.canonicalBucketIDs(modelID: modelName, displayName: modelName)
+                return mapped.isEmpty ? nil : mapped
+            }
+            let buckets = stepModelBuckets ?? ModelUsage.canonicalBucketIDs(modelID: currentModelID)
+            let resolvedBuckets = buckets.isEmpty ? ["gemini-5h", "gemini-weekly"] : buckets
+
+            let stepIn = max(0, step.input_tokens ?? 0)
+            let stepOut = max(0, step.output_tokens ?? 0)
+            let stepCached = max(0, step.cache_read_tokens ?? 0)
+            let stepTotal = stepIn + stepOut
+
+            for bucketID in resolvedBuckets {
                 summary.turnsByModel[bucketID, default: 0] += 1
+                if stepTotal > 0 {
+                    summary.tokensByModel[bucketID, default: 0] += stepTotal
+                }
                 recordLastUsed(stepDate, for: bucketID, into: &summary)
+            }
+
+            if var currentOverview = dailyOverview {
+                currentOverview.totalTurns += 1
+                currentOverview.inputTokens += stepIn
+                currentOverview.outputTokens += stepOut
+                currentOverview.cachedTokens += stepCached
+                currentOverview.estimatedCostUSD += Self.estimateCostUSD(
+                    bucketIDs: resolvedBuckets,
+                    inputTokens: stepIn,
+                    outputTokens: stepOut,
+                    cachedTokens: stepCached
+                )
+                dailyOverview = currentOverview
             }
         }
     }
@@ -537,13 +939,10 @@ public final class UsageTrackerService: Sendable {
         }
 
         let lower = content.lowercased()
-        if lower.contains("argon") || lower.contains("orchestrator") {
-            return "argon-weekly"
-        }
         if lower.contains("claude") || lower.contains("sonnet") || lower.contains("opus") || lower.contains("gpt") {
             return "3p-5h"
         }
-        if lower.contains("hydrogen") || lower.contains("flash") || lower.contains("pro") || lower.contains("gemini") {
+        if lower.contains("hydrogen") || lower.contains("flash") || lower.contains("pro") || lower.contains("gemini") || lower.contains("neon") || lower.contains("carbon") || lower.contains("argon") || lower.contains("orchestrator") {
             return "gemini-5h"
         }
         return nil

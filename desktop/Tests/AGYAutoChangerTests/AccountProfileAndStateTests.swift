@@ -39,4 +39,66 @@ final class AccountProfileAndStateTests: TempDirectoryTestCase {
         XCTAssertEqual(profile.modelUsages.first(where: { $0.id == "gemini-5h" })?.turnLimit, 450)
         XCTAssertEqual(profile.modelUsages.first(where: { $0.id == "gemini-5h" })?.turnsUsed, 7)
     }
+
+    func testAccountProfileAndSettingsBackwardCompatibleDecoding() throws {
+        let profileID = UUID()
+        let legacyProfileJSON = """
+        {
+            "id": "\(profileID.uuidString)",
+            "email": "legacy@company.dev",
+            "displayName": "Legacy Acc",
+            "avatarHex": "#3B82F6",
+            "tier": "pro",
+            "isActive": true,
+            "createdAt": "2026-11-15T10:00:00Z",
+            "hasKeychainBackup": true
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decodedProfile = try decoder.decode(AccountProfile.self, from: legacyProfileJSON)
+        XCTAssertEqual(decodedProfile.id, profileID)
+        XCTAssertEqual(decodedProfile.remark, "")
+        XCTAssertFalse(decodedProfile.isDisabled)
+        XCTAssertFalse(decodedProfile.hasDedicatedArgonPool)
+        XCTAssertEqual(decodedProfile.modelUsages.count, AppConfig.supportedModels.count)
+
+        let legacySettingsJSON = """
+        {
+            "agyAppBundlePath": "/Applications/Antigravity.app",
+            "autoRelaunchAGY": true
+        }
+        """.data(using: .utf8)!
+        let decodedSettings = try JSONDecoder().decode(SwitcherSettings.self, from: legacySettingsJSON)
+        XCTAssertTrue(decodedSettings.showQuickSummaryHeader)
+        XCTAssertEqual(decodedSettings.accountDisplayMode, .card)
+        XCTAssertEqual(decodedSettings.resetCountdownMode, .onHover)
+        XCTAssertEqual(decodedSettings.modelFilterScope, .all)
+    }
+
+    func testDedicatedArgonPoolAndUnknownObservationIndicators() {
+        var profile = AccountProfile(email: "argon@company.dev", displayName: "Argon User", tier: .pro)
+        XCTAssertFalse(profile.hasDedicatedArgonPool)
+        XCTAssertTrue(profile.extraDedicatedPoolLabels.isEmpty)
+        XCTAssertTrue(profile.modelUsages.allSatisfy(\.isUnknownObservation))
+
+        profile.modelUsages.append(
+            ModelUsage(
+                id: "carbon-weekly",
+                displayName: "Gemini 4 Carbon (Tuần)",
+                turnLimit: 300,
+                quotaRemainingFraction: 0.75
+            )
+        )
+        if let geminiIdx = profile.modelUsages.firstIndex(where: { $0.id == "gemini-5h" }) {
+            profile.modelUsages[geminiIdx].turnsUsed = 1
+        }
+
+        XCTAssertTrue(profile.hasDedicatedCarbonPool)
+        XCTAssertEqual(profile.extraDedicatedPoolLabels, ["Carbon"])
+        XCTAssertFalse(profile.modelUsages.first(where: { $0.id == "carbon-weekly" })?.isUnknownObservation ?? true)
+        XCTAssertFalse(profile.modelUsages.first(where: { $0.id == "gemini-5h" })?.isUnknownObservation ?? true)
+        XCTAssertTrue(profile.modelUsages.first(where: { $0.id == "3p-5h" })?.isUnknownObservation ?? false)
+    }
 }

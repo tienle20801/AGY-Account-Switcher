@@ -98,19 +98,28 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
         XCTAssertEqual(threePWeekly?.remainingFractionValue(at: refNow), 1.0)
         XCTAssertFalse(threePWeekly?.isRateLimited(at: refNow) ?? true)
 
-        // 2. Also verify fetchAvailableModels fallback parsing
+        // 2. Also verify fetchAvailableModels fallback parsing (with shared Gemini 4 models & ignored tab autocomplete)
         let fetchModelsJSON = """
         {
           "models": {
-            "MODEL_ARGON": {
-              "displayName": "Gemini 4 Argon (High)",
-              "model": "gemini-4-argon",
+            "gemini-4-argon": {
+              "displayName": "Gemini 4 Argon (Medium)",
+              "model": "MODEL_PLACEHOLDER_M99",
               "quotaInfo": { "remainingFraction": 0.82, "resetTime": "\(futureReset)" }
             },
-            "MODEL_FLASH": {
+            "gemini-4-carbon": {
+              "displayName": "Gemini 4 Carbon (Medium)",
+              "model": "MODEL_PLACEHOLDER_M100",
+              "quotaInfo": { "remainingFraction": 0.88, "resetTime": "\(futureReset)" }
+            },
+            "gemini-3-flash": {
               "displayName": "Gemini 3 Flash",
-              "model": "gemini-3-flash",
+              "model": "MODEL_PLACEHOLDER_M18",
               "quotaInfo": { "remainingFraction": 0.95, "resetTime": "\(futureReset)" }
+            },
+            "tab_flash_lite_preview": {
+              "model": "MODEL_PLACEHOLDER_M19",
+              "quotaInfo": { "remainingFraction": 1.0 }
             }
           }
         }
@@ -120,20 +129,21 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
             loadCodeAssistData: Data(loadAssistJSON.utf8),
             syncedAt: refNow
         )
-        XCTAssertEqual(fallbackSnapshot?.quotasByModel["argon-weekly"]?.remainingFraction ?? -1, 0.82, accuracy: 0.0001)
-        XCTAssertEqual(fallbackSnapshot?.quotasByModel["gemini-5h"]?.remainingFraction ?? -1, 0.95, accuracy: 0.0001)
+        XCTAssertEqual(fallbackSnapshot?.quotasByModel["gemini-5h"]?.remainingFraction ?? -1, 0.82, accuracy: 0.0001)
+        XCTAssertNil(fallbackSnapshot?.quotasByModel["argon-weekly"])
+        XCTAssertNil(fallbackSnapshot?.quotasByModel["tab_flash_lite_preview"])
     }
 
-    func testRetrieveUserQuotaMergesArgonWhenFetchAvailableModelsOmitsQuotaInfo() {
+    func testRetrieveUserQuotaMergesPhysicalModelsIntoGemini5hWhenFetchAvailableModelsOmitsQuotaInfo() {
         let service = CloudCodeQuotaService()
         let refNow = Date(timeIntervalSince1970: 1_750_000_000)
 
         let modelsJSON = """
         {
           "models": {
-            "MODEL_ARGON": {
-              "displayName": "Gemini 4 Argon",
-              "model": "gemini-4-argon"
+            "gemini-4-carbon": {
+              "displayName": "Gemini 4 Carbon",
+              "model": "MODEL_PLACEHOLDER_M100"
             }
           }
         }
@@ -142,7 +152,7 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
         {
           "buckets": [
             {
-              "modelId": "gemini-4-argon",
+              "modelId": "gemini-4-carbon",
               "remainingFraction": 0.28,
               "resetTime": "2026-11-22T12:00:00Z"
             },
@@ -162,8 +172,7 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
         )
 
         XCTAssertNotNil(snapshot)
-        XCTAssertEqual(snapshot?.quotasByModel["argon-weekly"]?.remainingFraction ?? -1, 0.28, accuracy: 0.0001)
-        XCTAssertEqual(snapshot?.quotasByModel["gemini-5h"]?.remainingFraction ?? -1, 0.91, accuracy: 0.0001)
+        XCTAssertEqual(snapshot?.quotasByModel["gemini-5h"]?.remainingFraction ?? -1, 0.28, accuracy: 0.0001)
     }
 
     @MainActor
@@ -175,6 +184,15 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
 
         let futureReset = Date().addingTimeInterval(3600 * 24)
         var usages = ModelUsage.defaultSet(for: .pro)
+        usages.append(
+            ModelUsage(
+                id: "argon-weekly",
+                displayName: "Gemini 4 Argon (Tuần)",
+                turnLimit: 200,
+                quotaRemainingFraction: 0.24,
+                quotaResetAt: futureReset
+            )
+        )
         for idx in usages.indices {
             usages[idx].quotaResetAt = futureReset
             switch usages[idx].id {
@@ -235,51 +253,136 @@ final class CloudCodeQuotaTests: TempDirectoryTestCase {
         XCTAssertTrue(sentAlerts.last?.body.contains("≤ 50%") ?? false)
     }
 
-    func testParseAgyCLIStreamJSONAndFallbackToSharedGeminiWeeklyForArgon() {
+    func testDynamicFutureGroupsGroupMembersHintAndPruningRetiredArgon() {
         let service = CloudCodeQuotaService()
+        let refNow = Date(timeIntervalSince1970: 1_750_000_000)
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        let future5h = fmt.string(from: refNow.addingTimeInterval(3600 * 3))
+        let futureWeek = fmt.string(from: refNow.addingTimeInterval(3600 * 24 * 6))
 
-        // 1. CLI `agy -p /usage --output-format stream-json` NDJSON parser
+        // 1. CLI `agy -p /usage --output-format stream-json` extracts dynamic `groupMembersHint` without leaking Neon/Argon into separate fake buckets
         let cliOutput = """
-        {"event":"log","message":"starting"}
-        {"event":"command_result","command":{"name":"usage","data":{"groups":[{"name":"Gemini 4 Argon","buckets":[{"id":"argon-weekly","window":"weekly","remaining_fraction":0.02,"reset_time":"2026-11-22T12:00:00Z"}]}]}}}
+        {"event":"command_result","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.94,"reset_time":"\(futureWeek)"},{"id":"gemini-5h","window":"5h","remaining_fraction":0.79,"reset_time":"\(future5h)"}]}]}}}
         """
         let cliQuotas = service.parseAgyCLIUsageOutput(cliOutput)
-        XCTAssertEqual(cliQuotas["argon-weekly"]?.remainingFraction ?? -1, 0.02, accuracy: 0.0001)
-        XCTAssertNotNil(cliQuotas["argon-weekly"]?.resetAt)
+        XCTAssertEqual(cliQuotas["gemini-weekly"]?.remainingFraction ?? -1, 0.94, accuracy: 0.0001)
+        XCTAssertEqual(cliQuotas["gemini-weekly"]?.groupMembersHint, "Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen")
+        XCTAssertNil(cliQuotas["argon-weekly"])
 
-        // 2. Shared Gemini Weekly fallback onto Argon when server omits separate Argon group
-        let summaryWithoutArgonJSON = """
+        // 2. REST summary with a brand-new unknown future group ("Gemini 5 Ultra") + retired `argon-weekly` missing -> dynamic discovery + prune
+        let summaryWithFutureGroupJSON = """
         {
           "groups": [
             {
               "displayName": "Gemini Models",
+              "description": "Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 3.8 Flash",
               "buckets": [
-                {
-                  "bucketId": "gemini-5h",
-                  "remainingFraction": 0.31,
-                  "resetTime": "2026-11-17T18:00:00Z"
-                },
-                {
-                  "bucketId": "gemini-weekly",
-                  "remainingFraction": 0.72,
-                  "resetTime": "2026-11-22T12:00:00Z"
-                }
+                { "bucketId": "gemini-5h", "remainingFraction": 0.71, "resetTime": "\(future5h)" },
+                { "bucketId": "gemini-weekly", "remainingFraction": 0.92, "resetTime": "\(futureWeek)" }
+              ]
+            },
+            {
+              "displayName": "Claude and GPT models",
+              "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5",
+              "buckets": [
+                { "bucketId": "3p-5h", "remainingFraction": 1.0, "resetTime": "\(future5h)" },
+                { "bucketId": "3p-weekly", "remainingFraction": 0.37, "resetTime": "\(futureWeek)" }
+              ]
+            },
+            {
+              "displayName": "Gemini 5 Ultra",
+              "description": "Models within this group: Gemini 5 Ultra Preview",
+              "buckets": [
+                { "bucketId": "weekly-limit", "window": "weekly", "remainingFraction": 0.55, "resetTime": "\(futureWeek)" },
+                { "bucketId": "5h-limit", "window": "5h", "remainingFraction": 0.80, "resetTime": "\(future5h)" }
               ]
             }
           ]
         }
         """
-        let projectedSnapshot = service.parseDashboardSnapshot(
-            fromQuotaSummaryData: Data(summaryWithoutArgonJSON.utf8)
+        let snapshot = service.parseDashboardSnapshot(
+            fromQuotaSummaryData: Data(summaryWithFutureGroupJSON.utf8),
+            syncedAt: refNow
         )
-        XCTAssertNotNil(projectedSnapshot?.quotasByModel["argon-weekly"])
-        XCTAssertEqual(projectedSnapshot?.quotasByModel["argon-weekly"]?.remainingFraction ?? -1, 0.72, accuracy: 0.0001)
-        XCTAssertEqual(projectedSnapshot?.quotasByModel["argon-weekly"]?.resetAt, projectedSnapshot?.quotasByModel["gemini-weekly"]?.resetAt)
+        XCTAssertNotNil(snapshot?.quotasByModel["gemini-5-ultra-weekly"])
+        XCTAssertNotNil(snapshot?.quotasByModel["gemini-5-ultra-5h"])
+        XCTAssertEqual(snapshot?.quotasByModel["gemini-5-ultra-weekly"]?.shortLabel, "Gemini 5 Ultra Tuần")
+        XCTAssertEqual(snapshot?.quotasByModel["gemini-5h"]?.groupMembersHint, "Gemini 4 Neon, Gemini 4 Carbon, Gemini 3.8 Flash")
+        XCTAssertNil(snapshot?.quotasByModel["argon-weekly"])
 
-        let existing = ModelUsage.defaultSet(for: .pro)
-        let applied = service.applyDashboardSnapshot(projectedSnapshot!, into: existing, currentTier: .pro)
-        let argonRow = applied.usages.first(where: { $0.id == "argon-weekly" })
-        XCTAssertTrue(argonRow?.hasDashboardQuota ?? false)
-        XCTAssertEqual(argonRow?.remainingPercentageInt, 72)
+        // Existing account with stale retired `argon-weekly = 6%` should prune `argon-weekly` and attach `Gemini 5 Ultra`
+        var existing = ModelUsage.defaultSet(for: .pro)
+        existing.append(
+            ModelUsage(
+                id: "argon-weekly",
+                displayName: "Gemini 4 Argon (Tuần)",
+                turnLimit: 200,
+                quotaRemainingFraction: 0.06,
+                quotaResetAt: futureWeek.isEmpty ? nil : UsageTrackerService.parseISO8601(futureWeek)
+            )
+        )
+        let applied = service.applyDashboardSnapshot(snapshot!, into: existing, currentTier: .pro)
+        XCTAssertNil(applied.usages.first(where: { $0.id == "argon-weekly" }))
+        let futureUltraFrac = applied.usages.first(where: { $0.id == "gemini-5-ultra-weekly" })?.remainingFractionValue(at: refNow) ?? -1
+        XCTAssertEqual(futureUltraFrac, 0.55, accuracy: 0.0001)
+        XCTAssertEqual(applied.usages.first(where: { $0.id == "gemini-5h" })?.groupMembersHint, "Gemini 4 Neon, Gemini 4 Carbon, Gemini 3.8 Flash")
+    }
+
+    func testDedicatedCarbonPoolStaysSeparateFromSharedGemini() {
+        let service = CloudCodeQuotaService()
+        let refNow = Date(timeIntervalSince1970: 1_750_000_000)
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        let future5h = fmt.string(from: refNow.addingTimeInterval(3600 * 3))
+        let futureWeek = fmt.string(from: refNow.addingTimeInterval(3600 * 24 * 6))
+
+        let summaryWithCarbonJSON = """
+        {
+          "groups": [
+            {
+              "displayName": "Gemini Models",
+              "buckets": [
+                { "bucketId": "gemini-5h", "remainingFraction": 0.90, "resetTime": "\(future5h)" },
+                { "bucketId": "gemini-weekly", "remainingFraction": 0.85, "resetTime": "\(futureWeek)" }
+              ]
+            },
+            {
+              "displayName": "Gemini 4 Carbon",
+              "buckets": [
+                { "bucketId": "gemini-carbon-5h", "remainingFraction": 0.35, "resetTime": "\(future5h)" },
+                { "bucketId": "gemini-carbon-wtu-weekly", "remainingFraction": 0.15, "resetTime": "\(futureWeek)" }
+              ]
+            }
+          ]
+        }
+        """
+
+        let snapshot = service.parseDashboardSnapshot(
+            fromQuotaSummaryData: Data(summaryWithCarbonJSON.utf8),
+            syncedAt: refNow,
+            projectSharedGeminiFallback: false
+        )
+        XCTAssertNotNil(snapshot)
+        XCTAssertEqual(snapshot?.quotasByModel["gemini-5h"]?.remainingFraction ?? -1, 0.90, accuracy: 0.0001)
+        XCTAssertEqual(snapshot?.quotasByModel["gemini-weekly"]?.remainingFraction ?? -1, 0.85, accuracy: 0.0001)
+        XCTAssertEqual(snapshot?.quotasByModel["carbon-5h"]?.remainingFraction ?? -1, 0.35, accuracy: 0.0001)
+        XCTAssertEqual(snapshot?.quotasByModel["carbon-weekly"]?.remainingFraction ?? -1, 0.15, accuracy: 0.0001)
+
+        let existing = ModelUsage.defaultSet(for: .ultra)
+        let applied = service.applyDashboardSnapshot(snapshot!, into: existing, currentTier: .ultra)
+        let profile = AccountProfile(email: "carbon@dev.com", displayName: "Carbon", tier: applied.tier, modelUsages: applied.usages)
+        XCTAssertTrue(profile.hasDedicatedCarbonPool)
+        XCTAssertEqual(profile.modelUsages.first(where: { $0.id == "carbon-5h" })?.remainingFractionValue(at: refNow) ?? -1, 0.35, accuracy: 0.0001)
+        XCTAssertEqual(profile.modelUsages.first(where: { $0.id == "carbon-weekly" })?.remainingFractionValue(at: refNow) ?? -1, 0.15, accuracy: 0.0001)
+
+        // An account without Carbon in server response must NOT receive fabricated Carbon rows.
+        let plainSnapshot = CloudCodeDashboardSnapshot(
+            quotasByModel: ["gemini-5h": ModelDashboardQuota(canonicalModelID: "gemini-5h", remainingFraction: 0.80)],
+            syncedAt: refNow
+        )
+        let plainApplied = service.applyDashboardSnapshot(plainSnapshot, into: ModelUsage.defaultSet(for: .pro), currentTier: .pro)
+        XCTAssertNil(plainApplied.usages.first(where: { $0.id == "carbon-5h" }))
+        XCTAssertNil(plainApplied.usages.first(where: { $0.id == "carbon-weekly" }))
     }
 }

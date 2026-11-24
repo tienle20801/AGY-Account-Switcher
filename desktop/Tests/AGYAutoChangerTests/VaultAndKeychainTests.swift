@@ -246,4 +246,73 @@ final class VaultAndKeychainTests: TempDirectoryTestCase {
         XCTAssertTrue(live.hasSessionFiles)
         XCTAssertTrue(live.hasAuthCredential)
     }
+
+    func testSeedProfileCredentialsAndPortableJSONExportImportRoundTrip() throws {
+        let vault = VaultSecurityService()
+        let keychainService = KeychainFallbackService(vaultSecurity: vault)
+        let profileDir = tempRoot.appendingPathComponent("seeded_profile", isDirectory: true)
+
+        let didSeed = try keychainService.seedProfileCredentials(
+            to: profileDir,
+            email: "portable@example.com",
+            tier: .ultra,
+            refreshToken: "1//test-refresh-token-abc",
+            rawKeyringSecretBase64: nil
+        )
+        XCTAssertTrue(didSeed)
+        XCTAssertTrue(vault.hasSnapshot(in: profileDir))
+
+        let backupFile = profileDir.appendingPathComponent("keychain_fallback.json", isDirectory: false)
+        let jetskiFile = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: jetskiFile.path))
+
+        let backupAttrs = try FileManager.default.attributesOfItem(atPath: backupFile.path)
+        XCTAssertEqual((backupAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let jetskiAttrs = try FileManager.default.attributesOfItem(atPath: jetskiFile.path)
+        XCTAssertEqual((jetskiAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+
+        XCTAssertEqual(keychainService.extractRefreshToken(fromProfileDir: profileDir), "1//test-refresh-token-abc")
+        let rawSecret = keychainService.extractPrimaryKeyringSecretBase64(fromProfileDir: profileDir)
+        XCTAssertNotNil(rawSecret)
+
+        let record = PortableAccountRecord(
+            email: "portable@example.com",
+            displayName: "Portable Acc",
+            remark: "Acc dự phòng",
+            tier: .ultra,
+            isDisabled: true,
+            refreshToken: keychainService.extractRefreshToken(fromProfileDir: profileDir),
+            rawKeyringSecretBase64: rawSecret
+        )
+        let bundle = PortableAccountExportBundle(schemaVersion: 2, exportedAt: Date(), accounts: [record])
+
+        let exportURL = tempRoot.appendingPathComponent("export.json", isDirectory: false)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(bundle)
+        try vault.writeProtectedData(encoded, to: exportURL)
+
+        let exportAttrs = try FileManager.default.attributesOfItem(atPath: exportURL.path)
+        XCTAssertEqual((exportAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decodedBundle = try decoder.decode(PortableAccountExportBundle.self, from: Data(contentsOf: exportURL))
+        XCTAssertEqual(decodedBundle.schemaVersion, 2)
+        XCTAssertEqual(decodedBundle.accounts.first?.remark, "Acc dự phòng")
+        XCTAssertEqual(decodedBundle.accounts.first?.isDisabled, true)
+        XCTAssertEqual(decodedBundle.accounts.first?.refreshToken, "1//test-refresh-token-abc")
+
+        let reimportedDir = tempRoot.appendingPathComponent("reimported_profile", isDirectory: true)
+        let reseeded = try keychainService.seedProfileCredentials(
+            to: reimportedDir,
+            email: decodedBundle.accounts[0].email,
+            tier: decodedBundle.accounts[0].tier,
+            refreshToken: decodedBundle.accounts[0].refreshToken,
+            rawKeyringSecretBase64: decodedBundle.accounts[0].rawKeyringSecretBase64
+        )
+        XCTAssertTrue(reseeded)
+        XCTAssertEqual(keychainService.extractRefreshToken(fromProfileDir: reimportedDir), "1//test-refresh-token-abc")
+    }
 }

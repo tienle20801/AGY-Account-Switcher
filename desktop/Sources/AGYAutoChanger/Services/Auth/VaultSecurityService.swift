@@ -32,6 +32,7 @@ public struct SnapshotManifest: Codable, Sendable, Equatable {
     public let ideAppSupportItems: [String]
     public let ideGeminiItems: [String]
     public let hasJetskiOAuthToken: Bool?
+    public let hasCLIOAuthToken: Bool?
 
     public init(
         capturedAt: Date,
@@ -39,7 +40,8 @@ public struct SnapshotManifest: Codable, Sendable, Equatable {
         geminiItems: [String],
         ideAppSupportItems: [String],
         ideGeminiItems: [String],
-        hasJetskiOAuthToken: Bool? = nil
+        hasJetskiOAuthToken: Bool? = nil,
+        hasCLIOAuthToken: Bool? = nil
     ) {
         self.capturedAt = capturedAt
         self.appSupportItems = appSupportItems
@@ -47,6 +49,7 @@ public struct SnapshotManifest: Codable, Sendable, Equatable {
         self.ideAppSupportItems = ideAppSupportItems
         self.ideGeminiItems = ideGeminiItems
         self.hasJetskiOAuthToken = hasJetskiOAuthToken
+        self.hasCLIOAuthToken = hasCLIOAuthToken
     }
 }
 
@@ -129,9 +132,11 @@ public final class VaultSecurityService: Sendable {
         let appSupportBackup = profileDir.appendingPathComponent("app_support", isDirectory: true)
         let geminiBackup = profileDir.appendingPathComponent("gemini", isDirectory: true)
         let jetskiTokenBackup = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
+        let cliTokenBackup = profileDir.appendingPathComponent("cli_oauth_token", isDirectory: false)
         return hasNonEmptyFiles(in: appSupportBackup)
             || hasNonEmptyFiles(in: geminiBackup)
             || fileManager.fileExists(atPath: jetskiTokenBackup.path)
+            || fileManager.fileExists(atPath: cliTokenBackup.path)
     }
 
     @discardableResult
@@ -142,13 +147,16 @@ public final class VaultSecurityService: Sendable {
         jetskiTokenURL: URL = AppConfig.jetskiOAuthTokenURL,
         includeIDE: Bool = false,
         ideAppSupportDir: URL = AppConfig.agyIDEAppSupportDir,
-        ideGeminiDir: URL = AppConfig.agyIDEGeminiDir
+        ideGeminiDir: URL = AppConfig.agyIDEGeminiDir,
+        includeCLI: Bool = true,
+        cliTokenURL: URL = AppConfig.agyCLIOAuthTokenURL
     ) throws -> SnapshotManifest {
         try createSecureDirectoryIfNeeded(at: profileDir)
 
         let appSupportDest = profileDir.appendingPathComponent("app_support", isDirectory: true)
         let geminiDest = profileDir.appendingPathComponent("gemini", isDirectory: true)
         let jetskiDest = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
+        let cliDest = profileDir.appendingPathComponent("cli_oauth_token", isDirectory: false)
 
         let capturedAppSupport = try copyTrackedItems(
             AppConfig.appSupportSessionItems,
@@ -171,6 +179,15 @@ public final class VaultSecurityService: Sendable {
             capturedJetskiToken = true
         } else if fileManager.fileExists(atPath: jetskiDest.path) {
             try? fileManager.removeItem(at: jetskiDest)
+        }
+
+        var capturedCLIToken = false
+        if includeCLI && fileManager.fileExists(atPath: cliTokenURL.path) {
+            try replaceItem(from: cliTokenURL, to: cliDest)
+            try applyPosixPermissions(AppConfig.filePermissions, to: cliDest)
+            capturedCLIToken = true
+        } else if includeCLI && fileManager.fileExists(atPath: cliDest.path) {
+            try? fileManager.removeItem(at: cliDest)
         }
 
         var capturedIDEAppSupport: [String] = []
@@ -198,12 +215,46 @@ public final class VaultSecurityService: Sendable {
             geminiItems: capturedGemini,
             ideAppSupportItems: capturedIDEAppSupport,
             ideGeminiItems: capturedIDEGemini,
-            hasJetskiOAuthToken: capturedJetskiToken
+            hasJetskiOAuthToken: capturedJetskiToken,
+            hasCLIOAuthToken: capturedCLIToken
         )
 
         let manifestURL = profileDir.appendingPathComponent("snapshot_manifest.json", isDirectory: false)
         try writeJSON(manifest, to: manifestURL)
         return manifest
+    }
+
+    /// Synchronizes `~/.gemini/antigravity-cli/antigravity-oauth-token` (`0600`) ONLY when `~/.gemini/antigravity-cli` already exists.
+    @discardableResult
+    public func restoreCLITokenOnly(
+        from profileDir: URL,
+        cliTokenURL: URL = AppConfig.agyCLIOAuthTokenURL,
+        fallbackOAuthJSON: Data? = nil
+    ) throws -> Bool {
+        let cliParentDir = cliTokenURL.deletingLastPathComponent()
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: cliParentDir.path, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+
+        let cliSource = profileDir.appendingPathComponent("cli_oauth_token", isDirectory: false)
+        let jetskiSource = profileDir.appendingPathComponent("jetski_oauth_token", isDirectory: false)
+
+        if fileManager.fileExists(atPath: cliSource.path) {
+            try replaceItem(from: cliSource, to: cliTokenURL)
+            try applyPosixPermissions(AppConfig.filePermissions, to: cliTokenURL)
+            return true
+        } else if fileManager.fileExists(atPath: jetskiSource.path) {
+            try replaceItem(from: jetskiSource, to: cliTokenURL)
+            try applyPosixPermissions(AppConfig.filePermissions, to: cliTokenURL)
+            return true
+        } else if let fallbackOAuthJSON, !fallbackOAuthJSON.isEmpty {
+            try writeProtectedData(fallbackOAuthJSON, to: cliTokenURL)
+            return true
+        } else if fileManager.fileExists(atPath: cliTokenURL.path) {
+            try fileManager.removeItem(at: cliTokenURL)
+        }
+        return false
     }
 
     public func restoreSessionSnapshot(
@@ -214,7 +265,10 @@ public final class VaultSecurityService: Sendable {
         jetskiTokenURL: URL = AppConfig.jetskiOAuthTokenURL,
         includeIDE: Bool = false,
         ideAppSupportDir: URL = AppConfig.agyIDEAppSupportDir,
-        ideGeminiDir: URL = AppConfig.agyIDEGeminiDir
+        ideGeminiDir: URL = AppConfig.agyIDEGeminiDir,
+        includeCLI: Bool = true,
+        cliTokenURL: URL = AppConfig.agyCLIOAuthTokenURL,
+        fallbackCLIOAuthJSON: Data? = nil
     ) throws {
         guard hasSnapshot(in: profileDir) else {
             throw VaultSecurityError.snapshotMissing(accountDisplayName)
@@ -236,7 +290,9 @@ public final class VaultSecurityService: Sendable {
             jetskiTokenURL: jetskiTokenURL,
             includeIDE: includeIDE,
             ideAppSupportDir: ideAppSupportDir,
-            ideGeminiDir: ideGeminiDir
+            ideGeminiDir: ideGeminiDir,
+            includeCLI: includeCLI,
+            cliTokenURL: cliTokenURL
         )
 
         do {
@@ -271,6 +327,14 @@ public final class VaultSecurityService: Sendable {
                 try fileManager.removeItem(at: jetskiTokenURL)
             }
 
+            if includeCLI {
+                _ = try restoreCLITokenOnly(
+                    from: profileDir,
+                    cliTokenURL: cliTokenURL,
+                    fallbackOAuthJSON: fallbackCLIOAuthJSON
+                )
+            }
+
             if includeIDE {
                 let ideSupportSource = profileDir.appendingPathComponent("ide_support", isDirectory: true)
                 if fileManager.fileExists(atPath: ideSupportSource.path) {
@@ -302,7 +366,9 @@ public final class VaultSecurityService: Sendable {
                     jetskiTokenURL: jetskiTokenURL,
                     includeIDE: includeIDE,
                     ideAppSupportDir: ideAppSupportDir,
-                    ideGeminiDir: ideGeminiDir
+                    ideGeminiDir: ideGeminiDir,
+                    includeCLI: includeCLI,
+                    cliTokenURL: cliTokenURL
                 )
             } catch let rollbackError {
                 rollbackErrorText = rollbackError.localizedDescription
@@ -317,7 +383,8 @@ public final class VaultSecurityService: Sendable {
     public func clearLiveSessionForNewLogin(
         appSupportDir: URL = AppConfig.agyAppSupportDir,
         geminiDir: URL = AppConfig.agyGeminiDir,
-        jetskiTokenURL: URL = AppConfig.jetskiOAuthTokenURL
+        jetskiTokenURL: URL = AppConfig.jetskiOAuthTokenURL,
+        cliTokenURL: URL = AppConfig.agyCLIOAuthTokenURL
     ) throws {
         try removeStaleRuntimeFiles(in: appSupportDir)
 
@@ -364,6 +431,9 @@ public final class VaultSecurityService: Sendable {
         if fileManager.fileExists(atPath: jetskiTokenURL.path) {
             try fileManager.removeItem(at: jetskiTokenURL)
         }
+        if fileManager.fileExists(atPath: cliTokenURL.path) {
+            try fileManager.removeItem(at: cliTokenURL)
+        }
     }
 
     public func deleteProfileDirectory(for accountID: UUID, profilesRoot: URL = AppConfig.profilesDir) throws {
@@ -373,16 +443,11 @@ public final class VaultSecurityService: Sendable {
         }
     }
 
-    // MARK: - Secure JSON Persistence
+    // MARK: - Secure JSON & File Persistence
 
-    public func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
+    public func writeProtectedData(_ data: Data, to url: URL) throws {
         let parent = url.deletingLastPathComponent()
         try createSecureDirectoryIfNeeded(at: parent)
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(value)
 
         let tempURL = parent.appendingPathComponent(".\(url.lastPathComponent).tmp.\(UUID().uuidString)")
         try data.write(to: tempURL, options: .atomic)
@@ -394,6 +459,14 @@ public final class VaultSecurityService: Sendable {
             try fileManager.moveItem(at: tempURL, to: url)
         }
         try applyPosixPermissions(AppConfig.filePermissions, to: url)
+    }
+
+    public func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(value)
+        try writeProtectedData(data, to: url)
     }
 
     public func readJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
@@ -467,7 +540,9 @@ public final class VaultSecurityService: Sendable {
         jetskiTokenURL: URL,
         includeIDE: Bool,
         ideAppSupportDir: URL,
-        ideGeminiDir: URL
+        ideGeminiDir: URL,
+        includeCLI: Bool,
+        cliTokenURL: URL
     ) throws {
         let appSupportRollback = rollbackDir.appendingPathComponent("app_support", isDirectory: true)
         if fileManager.fileExists(atPath: appSupportRollback.path) {
@@ -481,6 +556,16 @@ public final class VaultSecurityService: Sendable {
         if fileManager.fileExists(atPath: jetskiRollback.path) {
             try createSecureDirectoryIfNeeded(at: jetskiTokenURL.deletingLastPathComponent())
             try replaceItem(from: jetskiRollback, to: jetskiTokenURL)
+        }
+        if includeCLI {
+            let cliRollback = rollbackDir.appendingPathComponent("cli_oauth_token", isDirectory: false)
+            if fileManager.fileExists(atPath: cliRollback.path) {
+                let cliParent = cliTokenURL.deletingLastPathComponent()
+                if fileManager.fileExists(atPath: cliParent.path) {
+                    try replaceItem(from: cliRollback, to: cliTokenURL)
+                    try applyPosixPermissions(AppConfig.filePermissions, to: cliTokenURL)
+                }
+            }
         }
         if includeIDE {
             let ideSupportRollback = rollbackDir.appendingPathComponent("ide_support", isDirectory: true)
