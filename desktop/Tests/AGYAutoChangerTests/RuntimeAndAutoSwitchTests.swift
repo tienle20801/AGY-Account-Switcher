@@ -444,4 +444,134 @@ final class RuntimeAndAutoSwitchTests: TempDirectoryTestCase {
         XCTAssertEqual(decodedLegacy.monitoredBucketIDs, ["gemini-5h", "gemini-weekly"])
         XCTAssertEqual(decodedLegacy.triggerMatchMode, .anySelected)
     }
+
+    func testAllSelectedTreatsSameFamilySiblingWindowsAsOrAndAdaptivePollIntervals() {
+        let engine = SmartAutoSwitchService()
+        let now = Date()
+        let freshSync = now.addingTimeInterval(-20)
+        let futureReset = now.addingTimeInterval(3600 * 4)
+
+        func makeAccount(
+            name: String,
+            isActive: Bool = false,
+            g5: Double,
+            gw: Double,
+            c5: Double,
+            cw: Double
+        ) -> AccountProfile {
+            var usages = ModelUsage.defaultSet(for: .pro)
+            for idx in usages.indices {
+                usages[idx].quotaResetAt = futureReset
+                usages[idx].quotaSyncedAt = freshSync
+                switch usages[idx].id {
+                case "gemini-5h": usages[idx].quotaRemainingFraction = g5
+                case "gemini-weekly": usages[idx].quotaRemainingFraction = gw
+                case "3p-5h": usages[idx].quotaRemainingFraction = c5
+                case "3p-weekly": usages[idx].quotaRemainingFraction = cw
+                default: break
+                }
+            }
+            return AccountProfile(
+                email: "\(name.lowercased())@dev.com",
+                displayName: name,
+                tier: .pro,
+                isActive: isActive,
+                lastDashboardSyncAt: freshSync,
+                modelUsages: usages
+            )
+        }
+
+        let healthyBackup = makeAccount(name: "Healthy", g5: 0.99, gw: 0.99, c5: 1.0, cw: 0.37)
+
+        // 1. Exact user scenario: monitored = ["gemini-5h", "gemini-weekly"], triggerMatchMode = .allSelected,
+        // threshold = 5%, active has gemini-5h = 0% and gemini-weekly = 73% -> must trigger switch!
+        let activeSameFamilyDepleted = makeAccount(name: "Ngoctienle", isActive: true, g5: 0.0, gw: 0.73, c5: 1.0, cw: 1.0)
+        let geminiAllSelectedPolicy = AutoSwitchPolicy(
+            isEnabled: true,
+            timingMode: .immediateAtThreshold,
+            selectionStrategy: .priorityOrder,
+            modelScope: .geminiOnly,
+            monitoredBucketIDs: ["gemini-5h", "gemini-weekly"],
+            triggerMatchMode: .allSelected,
+            triggerThresholdPercent: 5,
+            minBackupQuotaPercent: 30
+        )
+        XCTAssertEqual(AutoSwitchPolicy.distinctFamilyCount(for: geminiAllSelectedPolicy.monitoredBucketIDs), 1)
+
+        let sameFamilyRes = engine.evaluate(
+            accounts: [healthyBackup, activeSameFamilyDepleted],
+            policy: geminiAllSelectedPolicy,
+            state: AutoSwitchRuntimeState(),
+            activityState: .idle,
+            hasSnapshot: { _ in true },
+            referenceDate: now
+        )
+        if case .readyToSwitch(let source, let target, _, let remaining) = sameFamilyRes.decision {
+            XCTAssertEqual(source.id, activeSameFamilyDepleted.id)
+            XCTAssertEqual(target.id, healthyBackup.id)
+            XCTAssertEqual(remaining, 0)
+        } else {
+            XCTFail("Expected readyToSwitch when gemini-5h hits 0% under same-family .allSelected, got \(sameFamilyRes.decision)")
+        }
+
+        // 2. Multi-family .allSelected with ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"]
+        let multiFamilyPolicy = AutoSwitchPolicy(
+            isEnabled: true,
+            timingMode: .immediateAtThreshold,
+            selectionStrategy: .priorityOrder,
+            modelScope: .all,
+            monitoredBucketIDs: ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"],
+            triggerMatchMode: .allSelected,
+            triggerThresholdPercent: 5,
+            minBackupQuotaPercent: 30
+        )
+        XCTAssertEqual(AutoSwitchPolicy.distinctFamilyCount(for: multiFamilyPolicy.monitoredBucketIDs), 2)
+
+        // Gemini blocked (5h=0%), Claude still usable (5h=100%, weekly=80%) -> .none
+        let activeOnlyGeminiDead = makeAccount(name: "GeminiDead", isActive: true, g5: 0.0, gw: 0.73, c5: 1.0, cw: 0.80)
+        let onlyGeminiRes = engine.evaluate(
+            accounts: [healthyBackup, activeOnlyGeminiDead],
+            policy: multiFamilyPolicy,
+            state: AutoSwitchRuntimeState(),
+            activityState: .idle,
+            hasSnapshot: { _ in true },
+            referenceDate: now
+        )
+        XCTAssertEqual(onlyGeminiRes.decision, .none)
+
+        // Both Gemini (5h=0%) and Claude (5h=4%) blocked while weeklies remain > 5% -> .readyToSwitch
+        let activeBothFamiliesDead = makeAccount(name: "BothDead", isActive: true, g5: 0.0, gw: 0.73, c5: 0.04, cw: 0.80)
+        let bothFamiliesRes = engine.evaluate(
+            accounts: [healthyBackup, activeBothFamiliesDead],
+            policy: multiFamilyPolicy,
+            state: AutoSwitchRuntimeState(),
+            activityState: .idle,
+            hasSnapshot: { _ in true },
+            referenceDate: now
+        )
+        if case .readyToSwitch(_, let target, _, _) = bothFamiliesRes.decision {
+            XCTAssertEqual(target.id, healthyBackup.id)
+        } else {
+            XCTFail("Expected readyToSwitch when both Gemini and Claude families are blocked via 5h, got \(bothFamiliesRes.decision)")
+        }
+
+        // 3. Adaptive background poll interval checks
+        var disabledPolicy = geminiAllSelectedPolicy
+        disabledPolicy.isEnabled = false
+        let healthyActive = makeAccount(name: "HealthyActive", isActive: true, g5: 0.80, gw: 0.90, c5: 1.0, cw: 1.0)
+        let nearThresholdActive = makeAccount(name: "NearActive", isActive: true, g5: 0.20, gw: 0.90, c5: 1.0, cw: 1.0)
+
+        XCTAssertEqual(
+            engine.recommendedPollIntervalNanoseconds(accounts: [healthyActive], policy: disabledPolicy, referenceDate: now),
+            AppConfig.backgroundQuotaPollIntervalNanoseconds
+        )
+        XCTAssertEqual(
+            engine.recommendedPollIntervalNanoseconds(accounts: [healthyActive], policy: geminiAllSelectedPolicy, referenceDate: now),
+            AppConfig.autoSwitchBackgroundPollIntervalNanoseconds
+        )
+        XCTAssertEqual(
+            engine.recommendedPollIntervalNanoseconds(accounts: [nearThresholdActive], policy: geminiAllSelectedPolicy, referenceDate: now),
+            AppConfig.autoSwitchNearThresholdPollIntervalNanoseconds
+        )
+    }
 }

@@ -133,7 +133,9 @@ public final class SmartAutoSwitchService: Sendable {
         case .anySelected:
             shouldTrigger = !triggeredBuckets.isEmpty
         case .allSelected:
-            shouldTrigger = triggeredBuckets.count == observedSourceBuckets.count
+            let observedFamilies = Set(observedSourceBuckets.map { AutoSwitchPolicy.bucketFamilyID(for: $0.id) })
+            let triggeredFamilies = Set(triggeredBuckets.map { AutoSwitchPolicy.bucketFamilyID(for: $0.id) })
+            shouldTrigger = !observedFamilies.isEmpty && triggeredFamilies == observedFamilies
         }
 
         guard shouldTrigger,
@@ -203,6 +205,28 @@ public final class SmartAutoSwitchService: Sendable {
                 )
             }
         }
+    }
+
+    public func recommendedPollIntervalNanoseconds(
+        accounts: [AccountProfile],
+        policy: AutoSwitchPolicy,
+        referenceDate: Date = Date()
+    ) -> UInt64 {
+        guard policy.isEnabled else {
+            return AppConfig.backgroundQuotaPollIntervalNanoseconds
+        }
+        if let active = accounts.first(where: { $0.isActive && !$0.isDisabled }) {
+            let nearCeiling = min(100, policy.triggerThresholdPercent + 20)
+            let isNearThreshold = active.modelUsages.contains { usage in
+                policy.includesBucket(usage.id)
+                    && !usage.isUnknownObservation
+                    && remainingPercent(of: usage, at: referenceDate) <= nearCeiling
+            }
+            if isNearThreshold {
+                return AppConfig.autoSwitchNearThresholdPollIntervalNanoseconds
+            }
+        }
+        return AppConfig.autoSwitchBackgroundPollIntervalNanoseconds
     }
 
     // MARK: - Candidate Eligibility & Ordering

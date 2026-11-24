@@ -107,8 +107,8 @@ public enum AutoSwitchTriggerMatchMode: String, Codable, CaseIterable, Sendable,
 
     public var title: String {
         switch self {
-        case .anySelected: return "1 trong mục chọn"
-        case .allSelected: return "Tất cả mục chọn"
+        case .anySelected: return "1 nhóm cạn"
+        case .allSelected: return "Tất cả nhóm cạn"
         }
     }
 }
@@ -145,6 +145,23 @@ public struct AutoSwitchPolicy: Codable, Sendable, Equatable {
         case .claudeOnly:
             return ["3p-5h", "3p-weekly"]
         }
+    }
+
+    /// Maps rolling windows of the same model pool to a shared family key
+    /// (`gemini-5h` & `gemini-weekly` -> `gemini`; `3p-5h` & `3p-weekly` -> `3p`).
+    public static func bucketFamilyID(for bucketID: String) -> String {
+        let lower = bucketID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.hasSuffix("-weekly") {
+            return String(lower.dropLast("-weekly".count))
+        }
+        if lower.hasSuffix("-5h") {
+            return String(lower.dropLast("-5h".count))
+        }
+        return lower
+    }
+
+    public static func distinctFamilyCount(for bucketIDs: [String]) -> Int {
+        Set(bucketIDs.map(bucketFamilyID(for:))).count
     }
 
     public func includesBucket(_ bucketID: String) -> Bool {

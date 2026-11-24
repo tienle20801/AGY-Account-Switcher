@@ -304,7 +304,7 @@ struct SettingsInlineView: View {
                             }
                         }
 
-                        if draft.autoSwitchPolicy.monitoredBucketIDs.count >= 2 {
+                        if AutoSwitchPolicy.distinctFamilyCount(for: draft.autoSwitchPolicy.monitoredBucketIDs) >= 2 {
                             HStack {
                                 Text("Điều kiện chuyển:")
                                     .font(.system(size: 11.5))
@@ -467,10 +467,11 @@ struct SettingsInlineView: View {
     }
 
     private var autoSwitchTriggerCaption: String {
-        if draft.autoSwitchPolicy.monitoredBucketIDs.count >= 2 && draft.autoSwitchPolicy.triggerMatchMode == .allSelected {
-            return "Chỉ tự động chuyển khi TẤT CẢ các mục đã chọn đồng thời còn ≤ \(draft.autoSwitchPolicy.triggerThresholdPercent)%. Thứ tự ưu tiên lấy theo danh sách kéo-thả."
+        if AutoSwitchPolicy.distinctFamilyCount(for: draft.autoSwitchPolicy.monitoredBucketIDs) >= 2
+            && draft.autoSwitchPolicy.triggerMatchMode == .allSelected {
+            return "Chỉ tự động chuyển khi TẤT CẢ các nhóm model đã chọn đều cạn (mỗi nhóm cạn nếu 5h hoặc Tuần còn ≤ \(draft.autoSwitchPolicy.triggerThresholdPercent)%). Quét nền mỗi 20–45s."
         }
-        return "Tự động chuyển khi 1 trong các mục đã chọn còn ≤ \(draft.autoSwitchPolicy.triggerThresholdPercent)% (bỏ qua acc Tạm tắt và cache quota cũ > 3 phút)."
+        return "Tự động chuyển khi 1 trong các mục đã chọn còn ≤ \(draft.autoSwitchPolicy.triggerThresholdPercent)% (hết 5h hay Tuần đều tự chuyển; quét nền mỗi 20–45s, bỏ qua acc Tạm tắt và cache cũ > 3 phút)."
     }
 
     private func toggleMonitoredBucket(_ bucketID: String) {
@@ -483,6 +484,9 @@ struct SettingsInlineView: View {
             selected.append(bucketID)
         }
         draft.autoSwitchPolicy.monitoredBucketIDs = selected
+        if AutoSwitchPolicy.distinctFamilyCount(for: selected) < 2 {
+            draft.autoSwitchPolicy.triggerMatchMode = .anySelected
+        }
         syncModelScopeFromSelectedBuckets(selected)
     }
 
@@ -493,6 +497,9 @@ struct SettingsInlineView: View {
         draft.autoSwitchPolicy.monitoredBucketIDs = preset.isEmpty
             ? AutoSwitchPolicy.defaultBucketIDs(for: scope)
             : preset
+        if AutoSwitchPolicy.distinctFamilyCount(for: draft.autoSwitchPolicy.monitoredBucketIDs) < 2 {
+            draft.autoSwitchPolicy.triggerMatchMode = .anySelected
+        }
         draft.autoSwitchPolicy.modelScope = scope
     }
 

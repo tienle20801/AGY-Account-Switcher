@@ -220,6 +220,8 @@ public enum AppConfig {
     public static let postTerminateFlushNanoseconds: UInt64 = 300_000_000
     public static let agyTerminateGraceDelayNanoseconds: UInt64 = 1_500_000_000
     public static let backgroundQuotaPollIntervalNanoseconds: UInt64 = 120_000_000_000
+    public static let autoSwitchBackgroundPollIntervalNanoseconds: UInt64 = 45_000_000_000
+    public static let autoSwitchNearThresholdPollIntervalNanoseconds: UInt64 = 20_000_000_000
     public static let lowQuotaAlertThresholdPercent: Int = 30
     public static let defaultRollingWindowHours: Double = 5.0
     public static let defaultCooldownMinutes: Int = 60

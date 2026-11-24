@@ -833,8 +833,12 @@ public final class AccountSwitcherService: ObservableObject {
         if sanitized.autoSwitchPolicy.isEnabled && sanitized.autoSwitchPolicy.monitoredBucketIDs.isEmpty {
             sanitized.autoSwitchPolicy.monitoredBucketIDs = AutoSwitchPolicy.defaultBucketIDs(for: sanitized.autoSwitchPolicy.modelScope)
         }
+        if AutoSwitchPolicy.distinctFamilyCount(for: sanitized.autoSwitchPolicy.monitoredBucketIDs) < 2 {
+            sanitized.autoSwitchPolicy.triggerMatchMode = .anySelected
+        }
         sanitized.weeklyWarmupPolicy.fiveHourStartHour = min(23, max(0, sanitized.weeklyWarmupPolicy.fiveHourStartHour))
         sanitized.weeklyWarmupPolicy.fiveHourEndHour = min(23, max(0, sanitized.weeklyWarmupPolicy.fiveHourEndHour))
+        let autoSwitchPolicyChanged = (sanitized.autoSwitchPolicy != settings.autoSwitchPolicy)
         let warmupPolicyChanged = (sanitized.weeklyWarmupPolicy != settings.weeklyWarmupPolicy)
         settings = sanitized
         try? vaultSecurity.writeJSON(settings, to: AppConfig.settingsMetadataURL)
@@ -848,6 +852,10 @@ public final class AccountSwitcherService: ObservableObject {
         persistAutoSwitchStateSilently()
         autoSwitchBanner = nil
         idleRecheckTask?.cancel()
+
+        if autoSwitchPolicyChanged {
+            restartBackgroundQuotaPolling()
+        }
 
         if warmupPolicyChanged {
             warmupTask?.cancel()
@@ -1026,6 +1034,7 @@ public final class AccountSwitcherService: ObservableObject {
             persistAccountsSilently()
             evaluateQuotaNotifications()
             await evaluateSmartAutoSwitch()
+            guard !Task.isCancelled else { return }
             if settings.weeklyWarmupPolicy.isEnabled,
                !isRunningWarmup,
                !switchPhase.isInProgress,
@@ -1555,13 +1564,24 @@ public final class AccountSwitcherService: ObservableObject {
         guard backgroundPollingTask == nil else { return }
         backgroundPollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: AppConfig.backgroundQuotaPollIntervalNanoseconds)
-                guard !Task.isCancelled, let self else { return }
+                guard let self else { return }
+                let pollInterval = self.smartAutoSwitch.recommendedPollIntervalNanoseconds(
+                    accounts: self.accounts,
+                    policy: self.settings.autoSwitchPolicy
+                )
+                try? await Task.sleep(nanoseconds: pollInterval)
+                guard !Task.isCancelled else { return }
                 if !self.switchPhase.isInProgress && !self.isRefreshingUsage {
                     self.refreshLiveStateAndUsage(readKeychainSecret: false)
                 }
             }
         }
+    }
+
+    private func restartBackgroundQuotaPolling() {
+        backgroundPollingTask?.cancel()
+        backgroundPollingTask = nil
+        startBackgroundQuotaPolling()
     }
 
     private func schedulePostSwitchDashboardSync(for accountID: UUID) {
